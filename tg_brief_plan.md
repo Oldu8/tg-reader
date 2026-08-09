@@ -19,292 +19,117 @@
 
 ---
 
-## 1. Telegram application
+## Смена подхода (2026-08-09)
 
-Открыть:
+Изначальный план (Node.js + TypeScript + TDLib с нуля) заменён на **форк готового проекта**
+[Telebrief](https://github.com/belaytzev/Telebrief) вместо билда с нуля — он уже закрывает
+большую часть инфраструктуры.
 
-`https://my.telegram.org`
+Причины:
+- TDLib на Windows требует нативной сборки (`tdjson.dll`) — болезненно в установке.
+- Библиотека `teleproto` (альтернатива GramJS) при аудите оказалась соло-мейнтейнер форком без
+  прозрачной истории — решили не рисковать сессией личного аккаунта.
+- Telebrief уже реализует user-client (Telethon) + Telegram bot (python-telegram-bot) + AI-саммари
+  с темами и ссылками на оригинальные сообщения — то есть почти весь стек из разделов 1–9 старого
+  плана, только на Python вместо Node/TS.
 
-Далее:
+Код Telebrief **вендорен локально** в этот репозиторий (не через `git fork` на GitHub — здесь нет
+настроенного `gh`/токена). Если понадобится push в собственный GitHub-репозиторий или синхронизация
+с апстримом, форкнуть вручную через https://github.com/belaytzev/Telebrief/fork и добавить как
+`upstream` remote.
 
-`API development tools` → `Create new application`
+Лицензия: MIT (сохранена, файл `LICENSE` в репозитории).
 
-Заполнить:
+---
 
-- App title: `TG Brief`
-- Short name: `tgbrief`
-- URL: можно оставить пустым
-- Platform: `Desktop`
-- Description: `Personal Telegram client for summarizing messages and chats.`
+## 1. Что уже есть в Telebrief (переиспользуем как есть)
 
-После создания приложения на странице конфигурации должны быть параметры:
+| Компонент | Файл | Роль |
+|---|---|---|
+| User-client (Telethon) | `src/collector.py` | подключение к личному аккаунту, чтение сообщений по `entity` + `limit` |
+| Bot commands | `src/bot_commands.py` | polling, обработка команд, rate-limit, авторизация по `target_user_id` |
+| AI-саммари | `src/summarizer.py`, `src/ai_providers.py` | chunking + вызов OpenAI/Anthropic/Ollama |
+| Группировка по темам | `src/grouper.py` | AI-detected topics (аналог `topics[]` из раздела 7 старого плана) |
+| Форматирование вывода | `src/formatter.py` | Markdown, эмодзи, ссылки на сообщения |
+| Конфиг | `src/config_loader.py`, `config.yaml.example` | настройки, привязанные к `.env` |
+| Хранилище (опционально) | `src/storage.py` | SQLite/Postgres — соответствует `storage/` из раздела 4 |
+| Одноразовая авторизация | `create_session.py` / `create_session.sh` | интерактивный логин личного аккаунта → `sessions/user.session` |
 
-- `App api_id`
-- `App api_hash`
-
-Они нужны для подключения user-client к Telegram API.
-
-Сохранить позже в `.env`:
+`.env` полностью совместим с уже созданными переменными:
 
 ```env
 TELEGRAM_API_ID=
 TELEGRAM_API_HASH=
-```
-
-Важно: `api_hash` нельзя публиковать и коммитить в Git.
-
-### Что такое "Available MTProto servers"
-
-Блок вида:
-
-- Test configuration
-- Production configuration
-- Public keys
-- MTProto server addresses
-
-— это серверная конфигурация Telegram.
-
-Для обычной разработки через TDLib вручную эти IP, порты и RSA public keys использовать не нужно.
-
-Нужны именно `api_id` и `api_hash`.
-
-Обычно они находятся выше на той же странице в секции **App configuration**.
-
----
-
-## 2. Telegram Bot
-
-Через `@BotFather` создать обычного Telegram-бота.
-
-Получить:
-
-```env
 TELEGRAM_BOT_TOKEN=
-```
-
-Этот бот будет только интерфейсом:
-
-- показывать кнопки;
-- выбирать чат;
-- выбирать количество сообщений;
-- присылать summary.
-
-Он сам не сможет читать историю личного Telegram-аккаунта.
-
----
-
-## 3. Telegram user-client
-
-Для чтения личных чатов использовать официальный Telegram client API.
-
-Предпочтительный вариант:
-
-**TDLib**
-
-User-client будет:
-
-- авторизовываться через личный Telegram-аккаунт;
-- получать список чатов;
-- получать unread_count;
-- читать историю;
-- получать message_id;
-- работать с группами, супергруппами и каналами.
-
----
-
-## 4. Начальная структура проекта
-
-```text
-tg_brief/
-├── src/
-│   ├── bot/
-│   ├── telegram-client/
-│   ├── summarizer/
-│   ├── storage/
-│   └── index.ts
-├── data/
-├── .env
-├── .env.example
-├── .gitignore
-├── package.json
-└── tsconfig.json
-```
-
-Стек для MVP:
-
-- Node.js
-- TypeScript
-- TDLib
-- Telegram Bot API
-- OpenAI API
-- SQLite
-
----
-
-## 5. Первый milestone — без AI и без бота
-
-Сначала сделать маленький CLI-прототип.
-
-Он должен уметь:
-
-1. Запустить TDLib.
-2. Авторизовать личный Telegram-аккаунт.
-3. Получить последние 20–50 чатов.
-4. Вывести:
-   - chat_id;
-   - title;
-   - type;
-   - unread_count.
-5. Выбрать один chat_id.
-6. Скачать последние 100 сообщений.
-7. Сохранить их в `messages.json`.
-
-Пример структуры сообщения:
-
-```ts
-{
-  messageId: number;
-  chatId: number;
-  senderId: number;
-  date: number;
-  text: string;
-  replyToMessageId?: number;
-}
-```
-
----
-
-## 6. Получение непрочитанных
-
-В дальнейшем реализовать отдельный режим:
-
-`Summarize unread`
-
-Логика:
-
-1. Получить состояние чата и `last_read_inbox_message_id`.
-2. Читать историю назад.
-3. Собрать сообщения новее последнего прочитанного.
-4. Передать их в summarizer.
-
-Не помечать сообщения прочитанными автоматически на первом этапе.
-
----
-
-## 7. OpenAI summary
-
-Добавить:
-
-```env
 OPENAI_API_KEY=
-```
-
-Не отправлять 1000–3000 сообщений одним огромным prompt.
-
-Использовать chunking:
-
-```text
-messages
-   ↓
-chunk 1 → summary
-chunk 2 → summary
-chunk 3 → summary
-   ↓
-final summary
-```
-
-Желательно просить модель возвращать JSON:
-
-```json
-{
-  "topics": [
-    {
-      "title": "Стоматологии",
-      "summary": "Обсуждали...",
-      "importantMessageIds": [123, 150]
-    }
-  ]
-}
-```
-
-Backend затем сам преобразует `messageId` в ссылки на Telegram-сообщения.
-
----
-
-## 8. Telegram Bot UI
-
-Начальный интерфейс:
-
-```text
-Выберите чат:
-
-[Украинцы в Астурии — 3124 unread]
-[IT Spain — 486 unread]
-[Аренда — 95 unread]
-```
-
-После выбора:
-
-```text
-Украинцы в Астурии
-
-[Все непрочитанные]
-[Последние 100]
-[Последние 500]
-[Последние 1000]
-[Назад]
+LOG_LEVEL=INFO
 ```
 
 ---
 
-## 9. Формат summary
+## 2. Чего в Telebrief нет и что нужно доделать (адаптация под наш сценарий)
 
-Пример:
+Telebrief рассчитан на **статический список каналов** в `config.yaml` и дайджест по времени
+(`lookback_hours`), с командами `/digest`, `/status`, `/cleanup`. Нашему сценарию (раздел 0) нужно
+другое:
 
-```text
-Украинцы в Астурии
-Проанализировано: 500 сообщений
+1. **Динамический список чатов вместо статичного config.yaml**
+   Добавить метод в `MessageCollector` (или новый модуль), который вызывает
+   `client.get_dialogs()` и возвращает список чатов личного аккаунта с `id`, `title`, `type`,
+   `unread_count` — это раздел 5 старого плана (шаги 3–4).
 
-1. Стоматологии
+2. **Inline-кнопки выбора чата и режима**
+   Новый flow в `bot_commands.py` (или отдельный `src/chat_picker.py`):
+   `/start` → кнопки со списком чатов (title + unread) → выбор чата → кнопки режима
+   (`Все непрочитанные` / `Последние 100` / `Последние 500` / `Последние 1000`) → генерация.
+   Соответствует разделу 8 старого плана. Технически — `CallbackQueryHandler` из
+   `python-telegram-bot` с `callback_data` вида `chat:<id>` / `mode:<n>`.
 
-Обсуждали несколько клиник в Овьедо.
-Пользователи сравнивали цены, очереди и качество обслуживания.
+3. **Fetch по количеству и по непрочитанным, а не по времени**
+   `fetch_channel_messages` в `collector.py` сейчас работает через `lookback_hours`. Нужно добавить
+   режимы:
+   - `last N` — `client.iter_messages(entity, limit=N)`;
+   - `unread` — прочитать `dialog.unread_count` из `get_dialogs()` и взять именно столько последних
+     сообщений (без пометки "прочитано" — как и требовал раздел 6 старого плана).
 
-Полезные сообщения:
-→ начало обсуждения
-→ рекомендация клиники
+4. **Саммари по одному выбранному чату "на лету"**
+   Сейчас `summarizer.py`/`grouper.py` работают над структурой "канал → сообщения" из конфига.
+   Нужно прогнать через них результат fetch для одного произвольного чата, выбранного в рантайме
+   (а не из `config.yaml`).
 
-2. Документы
+Форматирование вывода (топики + ссылки на сообщения, раздел 9 старого плана) уже покрыто
+`formatter.py` — адаптировать по мелочи под "один чат" вместо "несколько каналов".
 
-Обсуждали ...
-```
+Scheduled-дайджест по `config.yaml` (родная фича Telebrief) можно оставить как есть — она не мешает
+и может пригодиться отдельно.
 
 ---
 
-## 10. Порядок разработки
-
-Рекомендуемый порядок:
+## 3. Порядок работ (обновлённый)
 
 ```text
-Telegram App credentials
+✅ Получить TELEGRAM_API_ID / TELEGRAM_API_HASH (my.telegram.org)
+✅ Получить TELEGRAM_BOT_TOKEN (@BotFather)
+✅ Форкнуть/вендорить Telebrief, разобрать структуру
+✅ Привести .env к формату Telebrief
         ↓
-TDLib authorization
+Получить свой Telegram user_id (@userinfobot) → target_user_id в config.yaml
         ↓
-List chats
+Создать config.yaml из config.yaml.example
         ↓
-Read 100 messages
+Установить зависимости (uv sync или pip install -r requirements.txt)
         ↓
-messages.json
+Авторизовать личный аккаунт: python create_session.py → sessions/user.session
         ↓
-OpenAI summary
+Получить список диалогов (get_dialogs) — первая проверка user-client
         ↓
-Telegram bot
+Реализовать динамический список чатов + inline-кнопки (п. 2.1, 2.2)
         ↓
-Inline buttons
+Реализовать fetch по unread / last N (п. 2.3)
         ↓
-Unread mode
+Прогнать через summarizer/grouper/formatter для одного чата (п. 2.4)
         ↓
-Links to original messages
+End-to-end тест: /start → выбор чата → выбор режима → summary с темами и ссылками
 ```
 
 ---
@@ -314,13 +139,23 @@ Links to original messages
 Сделано:
 
 - [x] Название проекта: `tg_brief`
-- [x] Создание Telegram application начато
-- [ ] Найти `api_id`
-- [ ] Найти `api_hash`
-- [ ] Создать локальный Node.js + TypeScript проект
-- [ ] Подключить TDLib
-- [ ] Авторизовать Telegram account
-- [ ] Получить список чатов
-- [ ] Получить последние 100 сообщений
-- [ ] Добавить OpenAI summary
-- [ ] Создать Telegram Bot UI
+- [x] Создание Telegram application (my.telegram.org)
+- [x] `TELEGRAM_API_ID` получен
+- [x] `TELEGRAM_API_HASH` получен
+- [x] Telegram Bot создан через @BotFather, `TELEGRAM_BOT_TOKEN` получен
+- [x] Решение по стеку: форк Telebrief (Python/Telethon/python-telegram-bot) вместо Node/TS/TDLib
+- [x] Код Telebrief вендорен в репозиторий, лишнее (маркетинговый `website/`) удалено
+- [x] `.env` приведён к формату Telebrief, лишние MTProto-ключи убраны
+- [x] Локальный git-репозиторий инициализирован, baseline закоммичен
+
+Дальше:
+
+- [ ] Получить свой Telegram `user_id` через @userinfobot
+- [ ] Создать `config.yaml` из `config.yaml.example`, указать `target_user_id`
+- [ ] Установить зависимости проекта
+- [ ] Авторизовать личный Telegram-аккаунт (`create_session.py`) → `sessions/user.session`
+- [ ] Получить и вывести список диалогов (chat_id, title, type, unread_count)
+- [ ] Добавить inline-кнопки выбора чата и режима в `bot_commands.py`
+- [ ] Добавить fetch по `unread` / `last 100/500/1000` в `collector.py`
+- [ ] Связать fetch с `summarizer.py`/`grouper.py` для одного произвольного чата
+- [ ] End-to-end проверка сценария из раздела 0
