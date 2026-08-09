@@ -1,0 +1,575 @@
+<div align="center">
+  <img src="misc/logo.png" alt="Telebrief Logo" width="200"/>
+
+  # Telebrief
+
+  **Automated Telegram Digest Generator powered by AI**
+
+  [![CI](https://github.com/belaytzev/Telebrief/actions/workflows/ci.yml/badge.svg)](https://github.com/belaytzev/Telebrief/actions/workflows/ci.yml)
+  [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+  [![Python 3.14+](https://img.shields.io/badge/python-3.14+-blue.svg)](https://www.python.org/downloads/)
+  [![Contributions welcome](https://img.shields.io/badge/contributions-welcome-brightgreen.svg)](CONTRIBUTING.md)
+
+  Telebrief collects messages from your Telegram channels (in any language), generates AI-powered summaries, and delivers beautiful daily digests directly to your Telegram account. Group digests by channel or by **AI-detected topics**. Supports multiple AI providers: **OpenAI**, **Ollama** (local), and **Anthropic**. Output language is configurable (default: Russian).
+</div>
+
+---
+
+## ✨ Features
+
+- 🌐 **Multi-language Support** - Reads channels in ANY language (English, Russian, Ukrainian, Chinese, etc.)
+- 🌍 **Configurable Output Language** - All UI labels, summaries, and bot messages in any language (default: Russian)
+- 🤖 **Multi-Provider AI** - Supports OpenAI, Ollama (local), and Anthropic for summarization
+- ⏰ **Scheduled & On-Demand** - Daily automatic digests + instant generation via bot commands
+- 🔒 **Private Channel Support** - Access your private chats and channels
+- 📑 **Digest Modes** - Group by channel (default) or by AI-detected topics like News, Events, Sport
+- 🎨 **Smart Formatting** - Markdown with emojis, bullet points, and clickable channel links
+- 📨 **Long Message Splitting** - Digests that exceed Telegram's 4096-character limit are automatically split into sequential messages instead of being truncated
+- 🔐 **Secure** - Single-user only, credentials stored safely
+- 🧹 **Auto-cleanup** - Automatically removes old digest messages
+- 🔌 **MCP Server** - Optional built-in MCP endpoint so AI agents can pull digests instead of reading Telegram
+
+---
+
+## 📋 Prerequisites
+
+Before you begin, you'll need:
+
+1. **Python 3.14+** - [Download Python](https://www.python.org/downloads/)
+
+2. **Telegram App Credentials** - [Get from my.telegram.org](https://my.telegram.org)
+   - `api_id` and `api_hash`
+
+3. **Telegram Bot Token** - Create via [@BotFather](https://t.me/BotFather)
+   - Send `/newbot` to create a new bot
+   - Save the bot token
+
+4. **AI Provider API Key** (one of the following):
+   - **OpenAI**: [Get from platform.openai.com](https://platform.openai.com)
+   - **Anthropic**: [Get from console.anthropic.com](https://console.anthropic.com)
+   - **Ollama**: No API key needed - [install locally](https://ollama.ai)
+
+5. **Your Telegram User ID** - Get from [@userinfobot](https://t.me/userinfobot)
+   - Send `/start` to get your ID
+
+---
+
+## 🐳 Docker Deployment
+
+Telebrief can be run in Docker for easy deployment. **No Python installation required on host!**
+
+The image is published to GitHub Container Registry on every release:
+
+```bash
+# Pull the latest image
+docker pull ghcr.io/belaytzev/telebrief:latest
+```
+
+Available tags: `latest`, `X.Y` (minor), `X.Y.Z` (patch).
+
+```bash
+# 1. Create Telegram session (REQUIRED - one-time setup)
+./create_session.sh
+
+# 2. Start the service
+docker compose up -d
+
+# 3. View logs
+docker compose logs -f telebrief
+```
+
+The `docker-compose.yml` uses the pre-built GHCR image by default, so no local build step is needed. If you want to build from source instead, replace the `image:` line with `build: .`.
+
+**Important**: You must create the Telegram session file BEFORE running Docker. The script uses Docker itself, so no additional dependencies needed.
+
+---
+
+## 🤖 Bot Commands
+
+Open Telegram and message your bot:
+
+| Command | Description |
+|---------|-------------|
+| `/start` | Show welcome message and available commands |
+| `/help` | Display help message with all commands |
+| `/digest` | Generate and send digest for last 24 hours (uses configured `digest_mode`) |
+| `/status` | Show configuration, next scheduled run, and system info |
+| `/cleanup` | Manually delete old digest messages |
+
+---
+
+## 📊 Example Output
+
+Telebrief supports two digest modes configured via `digest_mode` in `config.yaml`.
+
+### Channel mode (`digest_mode: "channel"` — default)
+
+Groups summaries by source channel with clickable channel links:
+
+```markdown
+# 📊 Daily Digest — May 2, 2026
+
+## 🎯 Overview
+
+Today's main themes: AI tooling dominated with Anthropic's Claude Opus 4.7
+release, crypto markets rallied on spot ETF approvals, EU finalized
+amendments to the AI Act.
+
+---
+
+## 💻 TechCrunch
+
+- 🚀 **Claude Opus 4.7 released**: 1M context window, faster output
+- 🤖 **OpenAI GPT-6 leak**: Multimodal benchmarks surface early
+- 📱 **Apple Vision Pro 2**: Rumored Q3 launch with lighter frame
+
+## 💰 Crypto News
+
+- 📈 **Bitcoin hits $89K**: Spot ETF inflows reach record high
+- ⚠️ **SEC settles with Ripple**: Final ruling closes 6-year case
+- 🔐 **Ethereum Pectra upgrade**: Mainnet activation confirmed
+
+---
+📈 **Stats**: 20 channels, 1,847 messages processed
+```
+
+### Topic mode (`digest_mode: "digest"`)
+
+Groups summaries by AI-detected topics. You define topic groups in `config.yaml`:
+
+```yaml
+digest_mode: "digest"
+digest_groups:
+  - name: "Events"
+    description: "Conferences, meetups, releases, launches, announcements"
+  - name: "News"
+    description: "Politics, economy, world affairs, breaking news"
+  - name: "Sport"
+    description: "Sports results, transfers, tournaments, matches"
+```
+
+Messages that don't match any defined group are placed into an automatic "Other" category.
+
+> All labels (header, statistics, bot commands) follow the configured `output_language`. The example above uses English; set `output_language: "Russian"` (or any other language) to change the output.
+
+### `dedup_topics` — cross-channel deduplication
+
+When multiple channels cover the same event, the grouper normally produces one bullet point per channel. Enable `dedup_topics` to instruct the AI to keep only the most informative description and merge the source attributions:
+
+```yaml
+settings:
+  digest_mode: "digest"
+  dedup_topics: true        # default: false
+  digest_groups:
+    - name: "Tech"
+      description: "Technology news and releases"
+```
+
+With deduplication enabled, if `TechCrunch` and `HackerNews` both report the same product launch, the digest will contain a single bullet point with `source: "TechCrunch, HackerNews"` instead of two separate entries.
+
+> **Note:** `dedup_topics` has no effect in `digest_mode: "channel"` — deduplication only applies during topic-based grouping.
+
+---
+
+## ⚙️ Per-Channel Configuration
+
+Each channel entry supports two optional overrides in addition to the required `id` and `name` fields.
+
+### `lookback_hours` — per-channel lookback window
+
+Override the global `settings.lookback_hours` for a specific channel. Useful when some channels post infrequently and need a wider collection window, or when you want a tighter window for high-volume channels.
+
+```yaml
+channels:
+  - id: "@breaking_news"
+    name: "Breaking News"
+    # no lookback_hours — uses the global settings.lookback_hours
+
+  - id: "@weekly_digest"
+    name: "Weekly Newsletter"
+    lookback_hours: 168   # look back 7 days for this channel only
+
+  - id: -1001234567890
+    name: "High Volume Channel"
+    lookback_hours: 6     # only last 6 hours for this channel
+```
+
+`lookback_hours` must be a positive integer. If omitted or set to `null`, the global value is used.
+
+### `prompt_extra` — per-channel AI instructions
+
+Append extra instructions to the AI system prompt when summarizing a specific channel. Use this to guide tone, focus, or format for channels that need special treatment.
+
+```yaml
+channels:
+  - id: "@cryptonews"
+    name: "Crypto News"
+    prompt_extra: "Focus only on price movements and regulatory news. Ignore opinion pieces."
+
+  - id: "@jobboard"
+    name: "Job Board"
+    prompt_extra: "Extract only senior engineering roles. Format as a list: Role — Company — Link."
+```
+
+`prompt_extra` is appended verbatim to the channel's summarization system prompt. Leave it empty (or omit the field) for standard behavior.
+
+---
+
+## 🗄️ Persistent Storage
+
+By default, Telebrief generates digests on demand without storing raw messages. You can enable a persistent storage layer that saves every collected message to a database for historical access or external LLM workflows.
+
+Storage is **disabled by default** and opt-in via `config.yaml`.
+
+### SQLite (default backend)
+
+No extra setup required. Messages are saved to a local SQLite file.
+
+```yaml
+storage:
+  enabled: true
+  backend: sqlite
+  path: data/messages.db   # relative to project root
+```
+
+When running in Docker, the `data/` directory is already mounted as a volume in `docker-compose.yml`, so the database persists across container restarts.
+
+### PostgreSQL (optional backend)
+
+Use PostgreSQL for multi-host deployments or when you need concurrent read access to the message store.
+
+```yaml
+storage:
+  enabled: true
+  backend: postgres
+  url: "postgresql://user:pass@host:5432/dbname"
+```
+
+`asyncpg` is included in the standard dependencies and is installed automatically by `uv sync`. No extra install step is needed.
+
+### Schema
+
+Both backends create the same logical schema on first run (table and index are created automatically — no manual migration needed):
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `channel_name` | text | Channel name from your config |
+| `sender` | text | Message author |
+| `text` | text | Message body |
+| `timestamp` | text / timestamptz | Message timestamp |
+| `link` | text | Telegram message link |
+| `has_media` | bool / integer | Whether the message has media |
+| `media_type` | text | Media type string |
+| `collected_at` | text / timestamptz | When the row was inserted |
+
+**Note**: Storage is append-only. Overlapping `lookback_hours` windows across runs will produce duplicate rows for messages collected in both windows.
+
+---
+
+## 🔌 Extensibility
+
+Telebrief exposes four hook surfaces that let you customise behaviour via `config.yaml` without modifying core logic. All new fields are optional — existing configs run unchanged.
+
+### Filters
+
+A filter chain runs after message collection and before storage and summarization. Dropped messages never reach the AI or the database.
+
+Built-in filters live in `src/extensions/filters.py`:
+
+| Filter | Purpose |
+|--------|---------|
+| `KeywordFilter` | Keep/drop messages by keyword substring (case-insensitive) |
+| `RegexFilter` | Keep or drop messages matching a regex pattern |
+| `MinLengthFilter` | Drop messages shorter than a character threshold |
+
+Configure a global filter chain under `settings.filters`. Each entry needs a `class_path` (dotted import path) and an optional `config` dict passed as keyword arguments to the constructor:
+
+```yaml
+settings:
+  filters:
+    - class_path: src.extensions.filters.KeywordFilter
+      config:
+        include: ["job", "hiring", "remote"]
+        exclude: ["nsfw"]
+    - class_path: src.extensions.filters.MinLengthFilter
+      config:
+        min_chars: 30
+```
+
+Override the global chain for a single channel by adding `filters:` under that channel entry. Set `filters: []` to disable filtering for that channel entirely, or provide a different list to replace the global chain for that channel only:
+
+```yaml
+channels:
+  - id: "@jobboard"
+    name: "Job Board"
+    filters:
+      - class_path: src.extensions.filters.RegexFilter
+        config:
+          pattern: "senior|staff|principal"
+          mode: "include"
+```
+
+Write your own filter by implementing the `MessageFilter` Protocol:
+
+```python
+from __future__ import annotations
+from src.extensions.filters import MessageFilter
+from src.config_loader import ChannelConfig
+from src.collector import Message
+
+class MyFilter:
+    name = "my_filter"
+
+    def __init__(self, custom_param: str = "") -> None:
+        self.custom_param = custom_param
+
+    async def filter(self, channel: ChannelConfig, messages: list[Message]) -> list[Message]:
+        return [m for m in messages if self.custom_param in (m.text or "")]
+```
+
+Then reference it in `config.yaml`:
+
+```yaml
+settings:
+  filters:
+    - class_path: mypackage.mymodule.MyFilter
+      config:
+        custom_param: "important"
+```
+
+### Prompts
+
+The base prompt template lives in `src/prompts/base_summary.txt`. You can point to a custom template file or plug in a custom `PromptComposer` class.
+
+```yaml
+prompts:
+  base_template: src/prompts/base_summary.txt  # path to template file
+  composer: ""                                  # empty = built-in DefaultComposer
+```
+
+The built-in `DefaultComposer` assembles the final system prompt in this order (empty parts are skipped):
+
+```text
+base template (with {language} substituted)
+  + group.prompt_extra  (if channel belongs to a group with prompt_extra set)
+  + channel.prompt_extra  (if non-empty)
+```
+
+To use a custom composer, implement the `PromptComposer` Protocol and set `composer` to its dotted path:
+
+```python
+from src.config_loader import ChannelConfig, DigestGroupConfig
+from src.extensions.prompts import PromptComposer
+
+class MyComposer:
+    def __init__(self, base_template: str, language: str) -> None:
+        self._base = base_template
+        self._language = language
+
+    def compose(self, channel: ChannelConfig, group: DigestGroupConfig | None) -> str:
+        return f"{self._base}\nRespond in {self._language}."
+```
+
+> **Note:** The constructor must accept `(base_template: str, language: str)` as its first two positional arguments. A mismatched signature raises a `TypeError` at startup with a descriptive message.
+
+```yaml
+prompts:
+  composer: mypackage.mymodule.MyComposer
+```
+
+### Group binding
+
+Channels can be bound to a `digest_groups` entry. The group's `prompt_extra` is then injected into every channel in that group, before the channel's own `prompt_extra`.
+
+```yaml
+settings:
+  digest_groups:
+    - name: "Jobs"
+      description: "Job listings and hiring announcements"
+      prompt_extra: "Extract only role title, company, and link. Format as a list."
+
+channels:
+  - id: "@techleads_jobs"
+    name: "Tech Jobs"
+    group: Jobs          # must match a digest_groups name or "Other"
+    prompt_extra: "Focus on senior and staff-level positions only."
+```
+
+Channels without a `group` field (or `group: null`) use the base template and their own `prompt_extra` only.
+
+### Storage queries
+
+When storage is enabled (`storage.enabled: true`), the `StorageBackend` exposes a `query_messages` read API for external tooling:
+
+```python
+from src.storage import SQLiteBackend
+from datetime import datetime, timezone
+
+backend = SQLiteBackend("data/messages.db")
+await backend.initialize()
+
+messages = await backend.query_messages(
+    channel_name="TechCrunch",  # the configured channels[*].name (NOT the @id)
+    since=datetime(2026, 4, 1, tzinfo=timezone.utc),
+    until=datetime(2026, 4, 30, tzinfo=timezone.utc),
+    limit=500,
+)
+```
+
+All parameters are optional. `channel_name` matches the human-readable `channels[*].name` value from `config.yaml` (this is the value persisted to the `channel_name` column at collection time); omit it to query across all channels. Renaming a channel in config will change the value stored for new rows — historical rows keep the old name. Results are ordered by timestamp descending and capped at `limit` (default 1000, must be ≥ 1).
+
+---
+
+## 🔗 MCP Server
+
+Telebrief can expose its digests over the [Model Context Protocol](https://modelcontextprotocol.io), so an MCP client (Claude Code, for example) can request a digest directly instead of reading it in Telegram.
+
+The server runs **inside the Telebrief process**, sharing its Telegram session, configuration and generation lock with the scheduler and the bot. Digests it returns are byte-for-byte what Telegram receives, including topic grouping and deduplication.
+
+### Enabling it
+
+```yaml
+mcp:
+  enabled: true
+  host: "127.0.0.1"
+  port: 8765
+  path: "/mcp"
+```
+
+Then register it with your client:
+
+```bash
+claude mcp add --transport http telebrief http://127.0.0.1:8765/mcp
+```
+
+### Tools
+
+| Tool | Arguments | Behaviour |
+|------|-----------|-----------|
+| `get_digest` | `hours` (1–168, default 24) | Generates a fresh digest. Takes 20–90 seconds and spends AI provider tokens. |
+| `get_last_digest` | — | Returns the most recent digest from cache, with its generation time. Instant and free. |
+| `get_channel_messages` | `channel`, `hours` (1–168, default 24), `limit` (1–500, default 200) | Returns the individual messages of one channel, unsummarized. No AI tokens spent. |
+
+Every successful digest — scheduled, bot-triggered or MCP-triggered — is cached to `data/last_digest.json`, so `get_last_digest` serves the same digest that was delivered to Telegram.
+
+Digest generation is serialized: if the scheduler is already building a digest, an MCP call waits for it to finish rather than opening a second Telegram session.
+
+### Reading a single channel
+
+`get_channel_messages` answers "what was actually posted in this channel", as opposed to the AI summary a digest gives you.
+
+`channel` accepts either form from `config.yaml` — the human-readable `channels[*].name` or the `channels[*].id` (`@username` or numeric) — matched case-insensitively. An unknown value fails with the list of configured channel names, so no separate discovery call is needed.
+
+The tool reads from persistent storage when it is enabled and holds messages for the requested window, and falls back to a live Telegram read otherwise. The response header states which path was used:
+
+```text
+channel: AI News (from storage, 42 msgs, last 24h)
+
+[2026-08-07T09:12:04+00:00] Alice
+OpenAI released a new model...
+https://t.me/ainews/1234
+
+[2026-08-07T10:30:11+00:00] Bob
+[photo] Benchmark chart
+https://t.me/ainews/1235
+```
+
+Messages come back in chronological order; `limit` keeps the newest ones and drops the oldest. The live fallback runs under the same generation lock as digests and applies the channel's configured [filters](#filters), so both paths return the same set of messages.
+
+Two deliberate differences from digest generation:
+
+- `channels[*].lookback_hours` is **not** applied — the tool honours the `hours` the caller asked for.
+- Media-only messages arrive as their placeholder text (`[photo]`, `[video]`), exactly as they are stored.
+
+### Security
+
+**The MCP server has no authentication.** It relies on binding to loopback, where the SDK also enables DNS-rebinding protection. Anyone who can reach the port can trigger digest generation and read your channel summaries.
+
+Keep `host` on `127.0.0.1`. Telebrief logs a warning at startup if you bind anywhere else. In Docker, publish the port as `127.0.0.1:8765:8765` rather than exposing it on all interfaces, and put it behind a firewall or reverse proxy with auth if you genuinely need remote access.
+
+---
+
+## 🛠️ Development & Testing
+
+This project uses [uv](https://docs.astral.sh/uv/) for package management.
+
+### Running Tests
+
+```bash
+# Install development dependencies
+uv sync --extra dev
+
+# Run all tests
+uv run pytest tests/ -v
+
+# Type checking
+uv run mypy src/
+
+# Linting
+uv tool run ruff check src/ tests/
+
+# Auto-format code
+make format
+```
+
+---
+
+## ❓ FAQ
+
+**Q: Can I change the output language?**
+A: Yes! Set `output_language` in `config.yaml` to any language (e.g., "English", "Spanish", "Chinese").
+
+**Q: How many channels can I monitor?**
+A: Tested up to 50 channels. Performance depends on message volume.
+
+**Q: Can multiple users receive digests?**
+A: Currently single-user only. Multi-user support would require database and additional auth logic.
+
+**Q: Does it work with group chats?**
+A: Yes! Add group chat IDs to `config.yaml` the same way as channels.
+
+**Q: How do I switch to topic-based digests?**
+A: Set `digest_mode: "digest"` in `config.yaml` and define your `digest_groups`. Each group has a `name` and `description` that guides the AI classification. An implicit "Other" group catches anything that doesn't match.
+
+**Q: Can I customize the digest format?**
+A: Yes! Edit `src/formatter.py` to change Markdown structure, emojis, and sections.
+
+**Q: How much does it cost to run?**
+A: With OpenAI GPT-5-nano: ~$0.30/month. With Ollama: free (runs locally). Anthropic pricing varies by model.
+
+**Q: Can I use a local AI model?**
+A: Yes! Set `ai_provider: "ollama"` in config.yaml and install [Ollama](https://ollama.ai) on your machine.
+
+---
+
+## 🤝 Contributing
+
+Contributions are welcome! Bug reports, feature requests, documentation fixes, new filters, AI providers, storage backends, and translations are all appreciated.
+
+- Read the [Contributing Guide](CONTRIBUTING.md) for development setup, code style, and the PR process
+- This project follows the [Contributor Covenant Code of Conduct](CODE_OF_CONDUCT.md)
+- Found a security issue? Please report it privately — see the [Security Policy](SECURITY.md)
+
+---
+
+## 📄 License
+
+This project is licensed under the [MIT License](LICENSE).
+
+---
+
+## 🙏 Credits
+
+**Built with:**
+- [Telethon](https://github.com/LonamiWebs/Telethon) - Telegram User API
+- [python-telegram-bot](https://github.com/python-telegram-bot/python-telegram-bot) - Bot API
+- [OpenAI API](https://openai.com) - AI Summarization (OpenAI provider)
+- [Ollama](https://ollama.ai) - Local AI Summarization
+- [Anthropic API](https://anthropic.com) - AI Summarization (Anthropic provider)
+- [APScheduler](https://github.com/agronholm/apscheduler) - Task Scheduling
+
+---
+
+<div align="center">
+  <strong>Happy digesting! 📊🤖</strong>
+</div>

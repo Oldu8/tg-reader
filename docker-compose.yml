@@ -1,0 +1,52 @@
+services:
+  telebrief:
+    image: ghcr.io/belaytzev/telebrief:latest
+    container_name: telebrief
+    restart: unless-stopped
+
+    # Environment variables from .env file
+    env_file:
+      - .env
+
+    # Additional environment variables
+    environment:
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - TZ=UTC
+
+    # Optional: expose the MCP server (requires mcp.enabled and mcp.host: "0.0.0.0"
+    # in config.yaml, since 127.0.0.1 inside the container is unreachable from the host).
+    # The MCP server has no authentication — keep the host side on 127.0.0.1.
+    # ports:
+    #   - "127.0.0.1:8765:8765"
+
+    # Volumes for persistent data
+    volumes:
+      # Configuration file (read-only recommended)
+      - ./config.yaml:/app/config.yaml:ro
+
+      # Persistent data directories
+      - ./logs:/app/logs
+      # sessions/ must remain read-write: Telethon stores SQLite session files here
+      - ./sessions:/app/sessions
+      - ./data:/app/data
+
+      # Optional: Mount .env if not using env_file
+      # - ./.env:/app/.env:ro
+
+    # Logging configuration
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+    # Health check
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os, signal; os.kill(1, 0)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+    # Network mode (optional)
+    # network_mode: "host"  # Uncomment if you need host network access

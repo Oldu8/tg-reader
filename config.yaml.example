@@ -1,0 +1,142 @@
+# Telegram channels/chats to monitor
+channels:
+  - id: "@channelname"
+    name: "Example Channel"
+    # group: Jobs              # optional — bind to a digest_groups entry (or "Other")
+    # prompt_extra: ""         # optional — append extra instructions to this channel's AI prompt
+    # lookback_hours: null     # optional — override global lookback_hours for this channel
+    # filters: null            # optional — null=use global filters, []=no filters, list=override
+  # Add your channels here
+  # Format for public channels: "@channelname" (string with quotes)
+  # Format for private channels/groups: -1001234567890 (integer, NO quotes!)
+  #
+  # IMPORTANT: Get the correct channel ID using @RawDataBot
+  # - Forward a message from the channel to @RawDataBot
+  # - Copy the complete chat ID (should start with -100)
+  #
+  # ✅ Correct:   id: -1001234567890  (integer with -100 prefix, no quotes)
+  # ❌ Wrong:     id: "-1001234567890" (has quotes)
+  # ❌ Wrong:     id: -1234567890     (missing -100 prefix)
+
+# Application settings
+settings:
+  # Scheduling
+  schedule_time: "08:00"   # UTC time for daily digest
+  timezone: "UTC"
+  lookback_hours: 24       # Message collection window
+
+  # AI Provider: "openai", "ollama", or "anthropic"
+  # Required env vars per provider:
+  #   openai    -> OPENAI_API_KEY in .env
+  #   anthropic -> ANTHROPIC_API_KEY in .env
+  #   ollama    -> no API key needed
+  ai_provider: "openai"
+
+  # AI Model (provider-specific)
+  # OpenAI: "gpt-5-nano", "gpt-4o-mini", etc.
+  # Ollama: "llama3", "mistral", "gemma2", etc.
+  # Anthropic: "claude-sonnet-4-5-20250929", etc.
+  ai_model: "gpt-5-nano"
+
+  # Legacy OpenAI settings (used as fallback if ai_model not set)
+  openai_model: "gpt-5-nano"
+  openai_temperature: 1.0
+  max_tokens_per_summary: 1500
+
+  # Ollama settings (only used when ai_provider is "ollama")
+  ollama_base_url: "http://localhost:11434"
+
+  # Digest mode: "channel" (default) groups by channel, "digest" groups by topic
+  digest_mode: "channel"
+  # Deduplicate cross-channel topics: when true, the AI keeps only the most informative
+  # bullet point when multiple channels cover the same event (sources are merged).
+  # Only effective in digest_mode: "digest".
+  # dedup_topics: false
+  # Topic groups for digest mode (only used when digest_mode is "digest")
+  # An implicit "Other" group catches anything that doesn't match defined groups.
+  # digest_groups:
+  #   - name: "Events"
+  #     description: "Conferences, meetups, releases, launches, announcements"
+  #     prompt_extra: ""       # optional — append extra instructions to all channels in this group
+  #   - name: "News"
+  #     description: "Politics, economy, world affairs, breaking news"
+  #   - name: "Sport"
+  #     description: "Sports results, transfers, tournaments, matches"
+
+  # Filter chain — drop messages before they reach storage and the AI
+  # Runs after collection; filtered messages are never stored or summarized.
+  # Built-in filters: KeywordFilter, RegexFilter, MinLengthFilter
+  # filters:
+  #   - class_path: src.extensions.filters.KeywordFilter
+  #     config:
+  #       include: ["job", "hiring", "remote"]
+  #       exclude: ["nsfw"]
+  #   - class_path: src.extensions.filters.MinLengthFilter
+  #     config:
+  #       min_chars: 30
+
+  # Output
+  output_language: "Russian"  # Language for AI summaries (e.g., "English", "Russian", "Spanish")
+  use_emojis: true
+  include_statistics: true
+
+  # Telegram Bot
+  target_user_id: 0  # Your Telegram user ID (get from @userinfobot)
+  auto_cleanup_old_digests: true  # Automatically delete previous digest messages
+
+  # Safety limits
+  max_messages_per_channel: 500
+  max_prompt_chars: 8000  # Max characters of message content fed to AI per channel.
+                          # Keeps the most recent messages that fit. Increase for models with
+                          # large context windows; decrease if you hit "empty content + finish_reason=length".
+                          #
+                          # How to calculate:
+                          #   1. Find your model's context window (total tokens for input + output):
+                          #      - OpenAI:    https://platform.openai.com/docs/models
+                          #      - Anthropic: https://docs.anthropic.com/en/docs/about-claude/models
+                          #      - Ollama:    check model card on https://ollama.com/library
+                          #   2. Subtract max output tokens (e.g. max_tokens_per_summary * 2 as buffer)
+                          #   3. Subtract ~2000 tokens for system prompt and formatting
+                          #   4. Multiply remaining tokens by chars-per-token ratio:
+                          #      - English text:          ~4 chars/token
+                          #      - Russian/Cyrillic text: ~2-3 chars/token
+                          #      - Mixed/CJK text:       ~1.5-2 chars/token
+                          #
+                          # Example for gpt-4o-mini (128K context, 16K max output):
+                          #   (128000 - 16000 - 2000) * 2.5 = 275,000 chars (aggressive)
+                          #   Safe recommendation: 50000 (conservative for Russian content)
+                          #
+                          # Example for claude-sonnet (200K context, 8K max output):
+                          #   (200000 - 8000 - 2000) * 2.5 = 475,000 chars (aggressive)
+                          #   Safe recommendation: 100000
+                          #
+                          # Example for ollama llama3-8b (8K context, 2K max output):
+                          #   (8000 - 2000 - 2000) * 2.5 = 10,000 chars
+                          #   Safe recommendation: 8000
+  api_timeout: 30  # Ollama may need 120-300s for local models (enforced minimum: 120s)
+
+# Prompt customization — top-level block (sibling of settings:, not nested inside it)
+# base_template: path to the system prompt template file ({language} is substituted at runtime)
+# composer: dotted path to a custom PromptComposer class; empty = built-in DefaultComposer
+# prompts:
+#   base_template: src/prompts/base_summary.txt
+#   composer: ""
+
+# Storage — persist raw messages for history / external LLM workflows
+# Note: storage is append-only; overlapping lookback windows produce duplicate rows.
+# storage:
+#   enabled: false
+#   backend: sqlite          # "sqlite" (default, no extra setup) or "postgres"
+#   path: data/messages.db   # sqlite only — relative to project root; mount as volume in Docker
+#   url: ""                  # postgres: postgresql://user:pass@host:5432/db
+
+# MCP server — expose digests to MCP clients (Claude Code, etc.) over HTTP
+# Runs inside the Telebrief process; tools: get_digest(hours), get_last_digest()
+# Connect with: claude mcp add --transport http telebrief http://127.0.0.1:8765/mcp
+# WARNING: there is no authentication. Keep host on loopback, or firewall the port.
+# In Docker, publish it as "127.0.0.1:8765:8765" rather than binding 0.0.0.0 openly.
+# mcp:
+#   enabled: false
+#   host: "127.0.0.1"
+#   port: 8765
+#   path: "/mcp"

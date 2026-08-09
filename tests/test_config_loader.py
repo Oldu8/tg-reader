@@ -1,0 +1,1249 @@
+"""Tests for config_loader module."""
+
+import logging
+from unittest.mock import patch
+
+import pytest
+
+from src.config_loader import (
+    DigestGroupConfig,
+    FilterSpec,
+    McpConfig,
+    PromptsConfig,
+    StorageConfig,
+    load_config,
+)
+
+
+@pytest.mark.unit
+def test_load_config_success(temp_config_file, mock_env_vars):
+    """Test successful configuration loading."""
+    config = load_config(temp_config_file)
+
+    assert config is not None
+    assert len(config.channels) == 2
+    assert config.channels[0].id == "@test_channel"
+    assert config.channels[0].name == "Test Channel"
+    assert config.settings.schedule_time == "08:00"
+    assert config.settings.target_user_id == 123456789
+    assert config.telegram_api_id == 12345678
+    assert config.openai_api_key == "sk-test-key"
+    assert config.settings.ai_provider == "openai"
+    assert config.settings.ai_model == "gpt-5-nano"
+    assert config.settings.output_language == "Russian"
+
+
+@pytest.mark.unit
+def test_load_config_custom_output_language(tmp_path, mock_env_vars):
+    """Test config loading with custom output_language."""
+    config_content = """
+channels:
+  - id: "@test_channel"
+    name: "Test Channel"
+
+settings:
+  target_user_id: 123456789
+  output_language: "English"
+"""
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(config_content)
+
+    config = load_config(str(config_file))
+
+    assert config.settings.output_language == "English"
+
+
+@pytest.mark.unit
+def test_load_config_missing_file():
+    """Test error handling for missing config file."""
+    with pytest.raises(FileNotFoundError):
+        load_config("nonexistent.yaml")
+
+
+@pytest.mark.unit
+def test_load_config_missing_env_vars(tmp_path, monkeypatch):
+    """Test error handling for missing environment variables."""
+    # Create temp config file without using mock_env_vars
+    config_content = """
+channels:
+  - id: "@test_channel"
+    name: "Test Channel"
+
+settings:
+  target_user_id: 123456789
+"""
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(config_content)
+
+    # Remove all required env vars
+    monkeypatch.delenv("TELEGRAM_API_ID", raising=False)
+    monkeypatch.delenv("TELEGRAM_API_HASH", raising=False)
+    monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+    # Mock load_dotenv to prevent loading from .env file
+    with patch("src.config_loader.load_dotenv"):
+        with pytest.raises(ValueError, match="Missing required environment variables"):
+            load_config(str(config_file))
+
+
+@pytest.mark.unit
+def test_load_config_invalid_target_user(tmp_path, mock_env_vars):
+    """Test error handling for invalid target user ID."""
+    config_content = """
+channels:
+  - id: "@test"
+    name: "Test"
+
+settings:
+  target_user_id: 0
+"""
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(config_content)
+
+    with pytest.raises(ValueError, match="target_user_id not configured"):
+        load_config(str(config_file))
+
+
+@pytest.mark.unit
+def test_load_config_no_channels(tmp_path, mock_env_vars):
+    """Test error handling for no channels configured."""
+    config_content = """
+channels: []
+
+settings:
+  target_user_id: 123456789
+"""
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(config_content)
+
+    with pytest.raises(ValueError, match="No channels configured"):
+        load_config(str(config_file))
+
+
+@pytest.mark.unit
+def test_load_config_ollama_provider(tmp_path, monkeypatch):
+    """Test config loading with Ollama provider (no API keys needed)."""
+    monkeypatch.setenv("TELEGRAM_API_ID", "12345678")
+    monkeypatch.setenv("TELEGRAM_API_HASH", "test_hash")
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123456789:ABC-DEF")
+
+    config_content = """
+channels:
+  - id: "@test"
+    name: "Test"
+
+settings:
+  target_user_id: 123456789
+  ai_provider: "ollama"
+  ai_model: "llama3"
+  ollama_base_url: "http://myserver:11434"
+"""
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(config_content)
+
+    with patch("src.config_loader.load_dotenv"):
+        config = load_config(str(config_file))
+
+    assert config.settings.ai_provider == "ollama"
+    assert config.settings.ai_model == "llama3"
+    assert config.settings.ollama_base_url == "http://myserver:11434"
+
+
+@pytest.mark.unit
+def test_load_config_anthropic_provider_missing_key(tmp_path, monkeypatch):
+    """Test Anthropic provider requires ANTHROPIC_API_KEY."""
+    monkeypatch.setenv("TELEGRAM_API_ID", "12345678")
+    monkeypatch.setenv("TELEGRAM_API_HASH", "test_hash")
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123456789:ABC-DEF")
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+
+    config_content = """
+channels:
+  - id: "@test"
+    name: "Test"
+
+settings:
+  target_user_id: 123456789
+  ai_provider: "anthropic"
+"""
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(config_content)
+
+    with patch("src.config_loader.load_dotenv"):
+        with pytest.raises(ValueError, match="ANTHROPIC_API_KEY"):
+            load_config(str(config_file))
+
+
+@pytest.mark.unit
+def test_load_config_unsupported_provider(tmp_path, mock_env_vars):
+    """Test error for unsupported ai_provider value."""
+    config_content = """
+channels:
+  - id: "@test"
+    name: "Test"
+
+settings:
+  target_user_id: 123456789
+  ai_provider: "gemini"
+"""
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(config_content)
+
+    with pytest.raises(ValueError, match="Unsupported ai_provider"):
+        load_config(str(config_file))
+
+
+@pytest.mark.unit
+def test_load_config_null_ai_provider(tmp_path, mock_env_vars):
+    """Test that ai_provider: null gives a clear ValueError, not AttributeError."""
+    config_content = """
+channels:
+  - id: "@test"
+    name: "Test"
+
+settings:
+  target_user_id: 123456789
+  ai_provider: null
+"""
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(config_content)
+
+    with pytest.raises(ValueError, match="ai_provider must be a string"):
+        load_config(str(config_file))
+
+
+@pytest.mark.unit
+def test_load_config_temperature_fallback(tmp_path, mock_env_vars):
+    """Test that temperature falls back to openai_temperature when not set."""
+    config_content = """
+channels:
+  - id: "@test"
+    name: "Test"
+
+settings:
+  target_user_id: 123456789
+  openai_temperature: 0.5
+"""
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(config_content)
+
+    config = load_config(str(config_file))
+
+    assert config.settings.temperature == 0.5
+    assert config.settings.openai_temperature == 0.5
+
+
+@pytest.mark.unit
+def test_load_config_temperature_override(tmp_path, mock_env_vars):
+    """Test that explicit temperature overrides openai_temperature."""
+    config_content = """
+channels:
+  - id: "@test"
+    name: "Test"
+
+settings:
+  target_user_id: 123456789
+  openai_temperature: 0.5
+  temperature: 0.9
+"""
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(config_content)
+
+    config = load_config(str(config_file))
+
+    assert config.settings.temperature == 0.9
+
+
+@pytest.mark.unit
+def test_load_config_api_timeout_string_coercion(tmp_path, mock_env_vars):
+    """Test that api_timeout is coerced to int even when YAML provides a string."""
+    config_content = """
+channels:
+  - id: "@test"
+    name: "Test"
+
+settings:
+  target_user_id: 123456789
+  api_timeout: "60"
+"""
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(config_content)
+
+    config = load_config(str(config_file))
+
+    assert config.settings.api_timeout == 60
+    assert isinstance(config.settings.api_timeout, int)
+
+
+@pytest.mark.unit
+def test_load_config_default_max_tokens_per_summary(tmp_path, mock_env_vars):
+    """Test that max_tokens_per_summary defaults to 1500 when not specified."""
+    config_content = """
+channels:
+  - id: "@test"
+    name: "Test"
+
+settings:
+  target_user_id: 123456789
+"""
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(config_content)
+
+    config = load_config(str(config_file))
+
+    assert config.settings.max_tokens_per_summary == 1500
+
+
+@pytest.mark.unit
+def test_load_config_default_max_prompt_chars(tmp_path, mock_env_vars):
+    """Test that max_prompt_chars defaults to 8000 when not specified."""
+    config_content = """
+channels:
+  - id: "@test"
+    name: "Test"
+
+settings:
+  target_user_id: 123456789
+"""
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(config_content)
+
+    config = load_config(str(config_file))
+
+    assert config.settings.max_prompt_chars == 8000
+
+
+@pytest.mark.unit
+def test_load_config_custom_max_prompt_chars(tmp_path, mock_env_vars):
+    """Test that max_prompt_chars is loaded correctly from YAML."""
+    config_content = """
+channels:
+  - id: "@test"
+    name: "Test"
+
+settings:
+  target_user_id: 123456789
+  max_prompt_chars: 4000
+"""
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(config_content)
+
+    config = load_config(str(config_file))
+
+    assert config.settings.max_prompt_chars == 4000
+
+
+@pytest.mark.unit
+def test_load_config_digest_mode_with_groups(tmp_path, mock_env_vars):
+    """Test valid digest config loads correctly."""
+    config_content = """
+channels:
+  - id: "@test"
+    name: "Test"
+
+settings:
+  target_user_id: 123456789
+  digest_mode: "digest"
+  digest_groups:
+    - name: "Events"
+      description: "Conferences and meetups"
+    - name: "News"
+      description: "World affairs"
+"""
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(config_content)
+
+    config = load_config(str(config_file))
+
+    assert config.settings.digest_mode == "digest"
+    assert len(config.settings.digest_groups) == 2
+    assert config.settings.digest_groups[0] == DigestGroupConfig(
+        name="Events", description="Conferences and meetups"
+    )
+    assert config.settings.digest_groups[1] == DigestGroupConfig(
+        name="News", description="World affairs"
+    )
+
+
+@pytest.mark.unit
+def test_load_config_digest_defaults(tmp_path, mock_env_vars):
+    """Test missing digest_groups defaults to empty list, digest_mode defaults to channel."""
+    config_content = """
+channels:
+  - id: "@test"
+    name: "Test"
+
+settings:
+  target_user_id: 123456789
+"""
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(config_content)
+
+    config = load_config(str(config_file))
+
+    assert config.settings.digest_mode == "channel"
+    assert config.settings.digest_groups == []
+
+
+@pytest.mark.unit
+def test_load_config_invalid_digest_mode(tmp_path, mock_env_vars):
+    """Test invalid digest_mode value raises ValueError."""
+    config_content = """
+channels:
+  - id: "@test"
+    name: "Test"
+
+settings:
+  target_user_id: 123456789
+  digest_mode: "invalid"
+"""
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(config_content)
+
+    with pytest.raises(ValueError, match="Invalid digest_mode"):
+        load_config(str(config_file))
+
+
+@pytest.mark.unit
+def test_load_config_digest_mode_empty_groups_warns(tmp_path, mock_env_vars, caplog):
+    """Test digest_mode 'digest' with empty digest_groups logs warning."""
+    config_content = """
+channels:
+  - id: "@test"
+    name: "Test"
+
+settings:
+  target_user_id: 123456789
+  digest_mode: "digest"
+"""
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(config_content)
+
+    with caplog.at_level(logging.WARNING, logger="telebrief"):
+        config = load_config(str(config_file))
+
+    assert config.settings.digest_mode == "digest"
+    assert config.settings.digest_groups == []
+    assert "digest mode enabled but no digest_groups configured" in caplog.text
+
+
+@pytest.mark.unit
+def test_load_config_digest_groups_null(tmp_path, mock_env_vars):
+    """Test digest_groups: null (YAML key with no value) defaults to empty list."""
+    config_content = """
+channels:
+  - id: "@test"
+    name: "Test"
+
+settings:
+  target_user_id: 123456789
+  digest_groups:
+"""
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(config_content)
+
+    config = load_config(str(config_file))
+    assert config.settings.digest_groups == []
+
+
+@pytest.mark.unit
+def test_load_config_digest_groups_non_string_fields(tmp_path, mock_env_vars):
+    """Test digest_groups with non-string name/description raises ValueError."""
+    config_content = """
+channels:
+  - id: "@test"
+    name: "Test"
+
+settings:
+  target_user_id: 123456789
+  digest_groups:
+    - name: 123
+      description: "A numeric name"
+"""
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(config_content)
+
+    with pytest.raises(ValueError, match="must be strings"):
+        load_config(str(config_file))
+
+
+@pytest.mark.unit
+def test_load_config_valid_output_languages(tmp_path, mock_env_vars):
+    """Test that all supported languages are accepted."""
+    for lang in ("English", "Russian", "Spanish", "German", "French"):
+        config_content = f"""
+channels:
+  - id: "@test"
+    name: "Test"
+
+settings:
+  target_user_id: 123456789
+  output_language: "{lang}"
+"""
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(config_content)
+
+        config = load_config(str(config_file))
+        assert config.settings.output_language == lang
+
+
+@pytest.mark.unit
+def test_load_config_invalid_output_language(tmp_path, mock_env_vars):
+    """Test that invalid output_language raises ValueError with supported list."""
+    config_content = """
+channels:
+  - id: "@test"
+    name: "Test"
+
+settings:
+  target_user_id: 123456789
+  output_language: "Klingon"
+"""
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(config_content)
+
+    with pytest.raises(ValueError, match="Unsupported output_language") as exc_info:
+        load_config(str(config_file))
+
+    error_msg = str(exc_info.value)
+    assert "Klingon" in error_msg
+    for lang in ("English", "Russian", "Spanish", "German", "French"):
+        assert lang in error_msg
+
+
+@pytest.mark.unit
+def test_load_config_per_channel_overrides(tmp_path, mock_env_vars):
+    """Per-channel lookback_hours and prompt_extra are parsed into ChannelConfig."""
+    config_content = """
+channels:
+  - id: "@jobs"
+    name: "Jobs"
+    lookback_hours: 72
+    prompt_extra: "Focus on backend roles only."
+  - id: "@news"
+    name: "News"
+
+settings:
+  target_user_id: 123456789
+"""
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(config_content)
+
+    config = load_config(str(config_file))
+
+    jobs, news = config.channels
+    assert jobs.lookback_hours == 72
+    assert jobs.prompt_extra == "Focus on backend roles only."
+    assert news.lookback_hours is None
+    assert news.prompt_extra == ""
+
+
+@pytest.mark.unit
+def test_load_config_invalid_lookback_hours_type(tmp_path, mock_env_vars):
+    """Non-int lookback_hours raises ValueError."""
+    config_content = """
+channels:
+  - id: "@test"
+    name: "Test"
+    lookback_hours: "72h"
+
+settings:
+  target_user_id: 123456789
+"""
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(config_content)
+
+    with pytest.raises(ValueError, match="lookback_hours must be an int"):
+        load_config(str(config_file))
+
+
+@pytest.mark.unit
+def test_load_config_invalid_lookback_hours_value(tmp_path, mock_env_vars):
+    """Non-positive lookback_hours raises ValueError."""
+    config_content = """
+channels:
+  - id: "@test"
+    name: "Test"
+    lookback_hours: 0
+
+settings:
+  target_user_id: 123456789
+"""
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(config_content)
+
+    with pytest.raises(ValueError, match="lookback_hours must be positive"):
+        load_config(str(config_file))
+
+
+@pytest.mark.unit
+def test_load_config_duplicate_channel_names(tmp_path, mock_env_vars):
+    """Duplicate channel names raise ValueError to prevent silent override loss."""
+    config_content = """
+channels:
+  - id: "@first"
+    name: "Same Name"
+  - id: "@second"
+    name: "Same Name"
+
+settings:
+  target_user_id: 123456789
+"""
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(config_content)
+
+    with pytest.raises(ValueError, match="Duplicate channel names.*Same Name"):
+        load_config(str(config_file))
+
+
+# ---------------------------------------------------------------------------
+# StorageConfig tests
+# ---------------------------------------------------------------------------
+
+
+def _storage_config_file(tmp_path, storage_block: str) -> str:
+    content = f"""
+channels:
+  - id: "@test"
+    name: "Test"
+
+settings:
+  target_user_id: 123456789
+
+{storage_block}
+"""
+    p = tmp_path / "config.yaml"
+    p.write_text(content)
+    return str(p)
+
+
+@pytest.mark.unit
+def test_storage_config_missing_block_defaults(tmp_path, mock_env_vars):
+    config = load_config(_storage_config_file(tmp_path, ""))
+    assert config.storage == StorageConfig()
+    assert config.storage.enabled is False
+    assert config.storage.backend == "sqlite"
+    assert config.storage.path == "data/messages.db"
+    assert config.storage.url == ""
+
+
+@pytest.mark.unit
+def test_storage_config_sqlite_explicit(tmp_path, mock_env_vars):
+    block = """
+storage:
+  enabled: true
+  backend: sqlite
+  path: /tmp/test.db
+"""
+    config = load_config(_storage_config_file(tmp_path, block))
+    assert config.storage.enabled is True
+    assert config.storage.backend == "sqlite"
+    assert config.storage.path == "/tmp/test.db"
+
+
+@pytest.mark.unit
+def test_storage_config_postgres_with_url(tmp_path, mock_env_vars):
+    block = """
+storage:
+  enabled: true
+  backend: postgres
+  url: "postgresql://user:pass@localhost:5432/db"
+"""
+    config = load_config(_storage_config_file(tmp_path, block))
+    assert config.storage.enabled is True
+    assert config.storage.backend == "postgres"
+    assert config.storage.url == "postgresql://user:pass@localhost:5432/db"
+
+
+@pytest.mark.unit
+def test_storage_config_postgres_enabled_empty_url_raises(tmp_path, mock_env_vars):
+    block = """
+storage:
+  enabled: true
+  backend: postgres
+  url: ""
+"""
+    with pytest.raises(ValueError, match="storage.url must be set"):
+        load_config(_storage_config_file(tmp_path, block))
+
+
+@pytest.mark.unit
+def test_storage_config_postgres_disabled_empty_url_ok(tmp_path, mock_env_vars):
+    block = """
+storage:
+  enabled: false
+  backend: postgres
+  url: ""
+"""
+    config = load_config(_storage_config_file(tmp_path, block))
+    assert config.storage.enabled is False
+
+
+@pytest.mark.unit
+def test_storage_config_invalid_backend_raises(tmp_path, mock_env_vars):
+    block = """
+storage:
+  backend: mysql
+"""
+    with pytest.raises(ValueError, match="storage.backend must be"):
+        load_config(_storage_config_file(tmp_path, block))
+
+
+@pytest.mark.unit
+def test_storage_config_enabled_not_bool_raises(tmp_path, mock_env_vars):
+    block = """
+storage:
+  enabled: "yes"
+"""
+    with pytest.raises(ValueError, match="storage.enabled must be a bool"):
+        load_config(_storage_config_file(tmp_path, block))
+
+
+@pytest.mark.unit
+def test_storage_config_empty_path_raises(tmp_path, mock_env_vars):
+    block = """
+storage:
+  path: ""
+"""
+    with pytest.raises(
+        ValueError, match="storage.path must be a non-empty string when backend is 'sqlite'"
+    ):
+        load_config(_storage_config_file(tmp_path, block))
+
+
+@pytest.mark.unit
+def test_storage_config_url_not_string_raises(tmp_path, mock_env_vars):
+    block = """
+storage:
+  url: 12345
+"""
+    with pytest.raises(ValueError, match="storage.url must be a string"):
+        load_config(_storage_config_file(tmp_path, block))
+
+
+@pytest.mark.unit
+def test_storage_config_not_mapping_raises(tmp_path, mock_env_vars):
+    block = "storage: true"
+    with pytest.raises(ValueError, match="'storage' must be a mapping"):
+        load_config(_storage_config_file(tmp_path, block))
+
+
+# ---------------------------------------------------------------------------
+# FilterSpec / filter chain parsing tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_filter_spec_defaults_to_empty_global(tmp_path, mock_env_vars):
+    p = tmp_path / "config.yaml"
+    p.write_text(
+        'channels:\n  - id: "@test"\n    name: "Test"\nsettings:\n  target_user_id: 123456789\n'
+    )
+    config = load_config(str(p))
+    assert config.settings.filters == []
+
+
+@pytest.mark.unit
+def test_filter_spec_global_parsed(tmp_path, mock_env_vars):
+    p = tmp_path / "config.yaml"
+    p.write_text(
+        'channels:\n  - id: "@test"\n    name: "Test"\n'
+        "settings:\n  target_user_id: 123456789\n"
+        "  filters:\n"
+        "    - class_path: src.extensions.filters.KeywordFilter\n"
+        "      config:\n"
+        "        include:\n          - job\n"
+        "        exclude:\n          - nsfw\n"
+    )
+    config = load_config(str(p))
+    assert len(config.settings.filters) == 1
+    spec = config.settings.filters[0]
+    assert spec == FilterSpec(
+        class_path="src.extensions.filters.KeywordFilter",
+        config={"include": ["job"], "exclude": ["nsfw"]},
+    )
+
+
+@pytest.mark.unit
+def test_filter_spec_config_defaults_to_empty_dict(tmp_path, mock_env_vars):
+    p = tmp_path / "config.yaml"
+    p.write_text(
+        'channels:\n  - id: "@test"\n    name: "Test"\n'
+        "settings:\n  target_user_id: 123456789\n"
+        "  filters:\n"
+        "    - class_path: src.extensions.filters.MinLengthFilter\n"
+    )
+    config = load_config(str(p))
+    assert config.settings.filters[0].config == {}
+
+
+@pytest.mark.unit
+def test_filter_spec_channel_null_uses_global(tmp_path, mock_env_vars):
+    p = tmp_path / "config.yaml"
+    p.write_text(
+        'channels:\n  - id: "@test"\n    name: "Test"\n    filters:\n'
+        "settings:\n  target_user_id: 123456789\n"
+    )
+    config = load_config(str(p))
+    assert config.channels[0].filters is None
+
+
+@pytest.mark.unit
+def test_filter_spec_channel_empty_list_explicit_noop(tmp_path, mock_env_vars):
+    p = tmp_path / "config.yaml"
+    p.write_text(
+        'channels:\n  - id: "@test"\n    name: "Test"\n    filters: []\n'
+        "settings:\n  target_user_id: 123456789\n"
+    )
+    config = load_config(str(p))
+    assert config.channels[0].filters == []
+
+
+@pytest.mark.unit
+def test_filter_spec_channel_override(tmp_path, mock_env_vars):
+    p = tmp_path / "config.yaml"
+    p.write_text(
+        'channels:\n  - id: "@test"\n    name: "Test"\n'
+        "    filters:\n"
+        "      - class_path: src.extensions.filters.KeywordFilter\n"
+        "        config:\n          include:\n            - python\n"
+        "settings:\n  target_user_id: 123456789\n"
+        "  filters:\n"
+        "    - class_path: src.extensions.filters.MinLengthFilter\n"
+        "      config:\n        min_chars: 10\n"
+    )
+    config = load_config(str(p))
+    assert len(config.settings.filters) == 1
+    assert config.settings.filters[0].class_path == "src.extensions.filters.MinLengthFilter"
+    assert len(config.channels[0].filters) == 1
+    assert config.channels[0].filters[0].class_path == "src.extensions.filters.KeywordFilter"
+
+
+@pytest.mark.unit
+def test_filter_spec_missing_class_path_raises(tmp_path, mock_env_vars):
+    p = tmp_path / "config.yaml"
+    p.write_text(
+        'channels:\n  - id: "@test"\n    name: "Test"\n'
+        "settings:\n  target_user_id: 123456789\n"
+        "  filters:\n    - config:\n        min_chars: 10\n"
+    )
+    with pytest.raises(ValueError, match="missing required field 'class_path'"):
+        load_config(str(p))
+
+
+@pytest.mark.unit
+def test_filter_spec_non_string_class_path_raises(tmp_path, mock_env_vars):
+    p = tmp_path / "config.yaml"
+    p.write_text(
+        'channels:\n  - id: "@test"\n    name: "Test"\n'
+        "settings:\n  target_user_id: 123456789\n"
+        "  filters:\n    - class_path: 42\n"
+    )
+    with pytest.raises(ValueError, match="class_path must be a non-empty string"):
+        load_config(str(p))
+
+
+@pytest.mark.unit
+def test_filter_spec_non_dict_config_raises(tmp_path, mock_env_vars):
+    p = tmp_path / "config.yaml"
+    p.write_text(
+        'channels:\n  - id: "@test"\n    name: "Test"\n'
+        "settings:\n  target_user_id: 123456789\n"
+        "  filters:\n"
+        "    - class_path: src.extensions.filters.MinLengthFilter\n"
+        "      config: not a dict\n"
+    )
+    with pytest.raises(ValueError, match="config must be a mapping"):
+        load_config(str(p))
+
+
+@pytest.mark.unit
+def test_filter_spec_non_mapping_item_raises(tmp_path, mock_env_vars):
+    p = tmp_path / "config.yaml"
+    p.write_text(
+        'channels:\n  - id: "@test"\n    name: "Test"\n'
+        "settings:\n  target_user_id: 123456789\n"
+        "  filters:\n    - src.extensions.filters.MinLengthFilter\n"
+    )
+    with pytest.raises(ValueError, match="must be a mapping"):
+        load_config(str(p))
+
+
+@pytest.mark.unit
+def test_filter_spec_channel_invalid_class_path_raises(tmp_path, mock_env_vars):
+    p = tmp_path / "config.yaml"
+    p.write_text(
+        'channels:\n  - id: "@test"\n    name: "Test"\n'
+        "    filters:\n      - class_path: 99\n"
+        "settings:\n  target_user_id: 123456789\n"
+    )
+    with pytest.raises(ValueError, match="class_path must be a non-empty string"):
+        load_config(str(p))
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "bad_path",
+    ["NoDots", "trailing.", ".leading", "two..dots", "has space.Cls", "1bad.Cls"],
+)
+def test_filter_spec_invalid_dotted_path_raises(tmp_path, mock_env_vars, bad_path):
+    p = tmp_path / "config.yaml"
+    p.write_text(
+        'channels:\n  - id: "@test"\n    name: "Test"\n'
+        "settings:\n  target_user_id: 123456789\n"
+        f"  filters:\n    - class_path: {bad_path!r}\n"
+    )
+    with pytest.raises(ValueError, match="must be a dotted path"):
+        load_config(str(p))
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "bad_composer",
+    ["NoDots", "trailing.", ".leading", "two..dots", "has space.Cls", "1bad.Cls"],
+)
+def test_prompts_composer_invalid_dotted_path_raises(tmp_path, mock_env_vars, bad_composer):
+    p = tmp_path / "config.yaml"
+    p.write_text(
+        'channels:\n  - id: "@test"\n    name: "Test"\n'
+        "settings:\n  target_user_id: 123456789\n"
+        "prompts:\n"
+        f"  composer: {bad_composer!r}\n"
+    )
+    with pytest.raises(ValueError, match="prompts.composer must be a dotted path"):
+        load_config(str(p))
+
+
+@pytest.mark.unit
+def test_prompts_composer_empty_string_allowed(tmp_path, mock_env_vars):
+    p = tmp_path / "config.yaml"
+    p.write_text(
+        'channels:\n  - id: "@test"\n    name: "Test"\n'
+        "settings:\n  target_user_id: 123456789\n"
+        "prompts:\n"
+        "  composer: ''\n"
+    )
+    config = load_config(str(p))
+    assert config.prompts.composer == ""
+
+
+@pytest.mark.unit
+def test_prompts_config_strips_whitespace(tmp_path, mock_env_vars):
+    p = tmp_path / "config.yaml"
+    p.write_text(
+        'channels:\n  - id: "@test"\n    name: "Test"\n'
+        "settings:\n  target_user_id: 123456789\n"
+        "prompts:\n"
+        "  base_template: '  src/prompts/base_summary.txt  '\n"
+        "  composer: '  src.extensions.prompts.DefaultComposer  '\n"
+    )
+    config = load_config(str(p))
+    assert config.prompts.base_template == "src/prompts/base_summary.txt"
+    assert config.prompts.composer == "src.extensions.prompts.DefaultComposer"
+
+
+@pytest.mark.unit
+def test_sample_config_fixture_still_constructs(sample_config):
+    assert sample_config.settings.filters == []
+    assert sample_config.channels[0].filters is None
+
+
+# ---------------------------------------------------------------------------
+# Group binding and PromptsConfig tests (Task 8)
+# ---------------------------------------------------------------------------
+
+
+def _group_config_file(tmp_path, channels_block: str, settings_block: str, extra: str = "") -> str:
+    content = f"""
+channels:
+{channels_block}
+
+settings:
+  target_user_id: 123456789
+{settings_block}
+{extra}
+"""
+    p = tmp_path / "config.yaml"
+    p.write_text(content)
+    return str(p)
+
+
+@pytest.mark.unit
+def test_digest_group_prompt_extra_parsed(tmp_path, mock_env_vars):
+    p = tmp_path / "config.yaml"
+    p.write_text(
+        'channels:\n  - id: "@test"\n    name: "Test"\n'
+        "settings:\n  target_user_id: 123456789\n"
+        "  digest_groups:\n"
+        "    - name: Jobs\n"
+        "      description: Job offers\n"
+        "      prompt_extra: Focus on remote roles.\n"
+    )
+    config = load_config(str(p))
+    assert config.settings.digest_groups[0].prompt_extra == "Focus on remote roles."
+
+
+@pytest.mark.unit
+def test_digest_group_prompt_extra_defaults_empty(tmp_path, mock_env_vars):
+    p = tmp_path / "config.yaml"
+    p.write_text(
+        'channels:\n  - id: "@test"\n    name: "Test"\n'
+        "settings:\n  target_user_id: 123456789\n"
+        "  digest_groups:\n"
+        "    - name: Jobs\n"
+        "      description: Job offers\n"
+    )
+    config = load_config(str(p))
+    assert config.settings.digest_groups[0].prompt_extra == ""
+
+
+@pytest.mark.unit
+def test_digest_group_prompt_extra_non_string_raises(tmp_path, mock_env_vars):
+    p = tmp_path / "config.yaml"
+    p.write_text(
+        'channels:\n  - id: "@test"\n    name: "Test"\n'
+        "settings:\n  target_user_id: 123456789\n"
+        "  digest_groups:\n"
+        "    - name: Jobs\n"
+        "      description: Job offers\n"
+        "      prompt_extra: 42\n"
+    )
+    with pytest.raises(ValueError, match="prompt_extra must be a string"):
+        load_config(str(p))
+
+
+@pytest.mark.unit
+def test_channel_group_field_parsed(tmp_path, mock_env_vars):
+    p = tmp_path / "config.yaml"
+    p.write_text(
+        'channels:\n  - id: "@jobs"\n    name: "Jobs"\n    group: MyGroup\n'
+        "settings:\n  target_user_id: 123456789\n"
+        "  digest_groups:\n"
+        "    - name: MyGroup\n"
+        "      description: My group\n"
+    )
+    config = load_config(str(p))
+    assert config.channels[0].group == "MyGroup"
+
+
+@pytest.mark.unit
+def test_channel_group_none_by_default(tmp_path, mock_env_vars):
+    p = tmp_path / "config.yaml"
+    p.write_text(
+        'channels:\n  - id: "@test"\n    name: "Test"\n' "settings:\n  target_user_id: 123456789\n"
+    )
+    config = load_config(str(p))
+    assert config.channels[0].group is None
+
+
+@pytest.mark.unit
+def test_channel_group_other_accepted(tmp_path, mock_env_vars):
+    p = tmp_path / "config.yaml"
+    p.write_text(
+        'channels:\n  - id: "@test"\n    name: "Test"\n    group: Other\n'
+        "settings:\n  target_user_id: 123456789\n"
+    )
+    config = load_config(str(p))
+    assert config.channels[0].group == "Other"
+
+
+@pytest.mark.unit
+def test_channel_group_localized_other_accepted(tmp_path, mock_env_vars):
+    # Russian localized "Other" is "Другое"
+    p = tmp_path / "config.yaml"
+    p.write_text(
+        'channels:\n  - id: "@test"\n    name: "Test"\n    group: "Другое"\n'
+        "settings:\n  target_user_id: 123456789\n  output_language: Russian\n"
+    )
+    config = load_config(str(p))
+    assert config.channels[0].group == "Другое"
+
+
+@pytest.mark.unit
+def test_channel_unknown_group_raises(tmp_path, mock_env_vars):
+    p = tmp_path / "config.yaml"
+    p.write_text(
+        'channels:\n  - id: "@test"\n    name: "Test"\n    group: NonExistent\n'
+        "settings:\n  target_user_id: 123456789\n"
+    )
+    with pytest.raises(ValueError, match="Unknown group references"):
+        load_config(str(p))
+
+
+@pytest.mark.unit
+def test_channel_unknown_group_error_lists_bad_channel(tmp_path, mock_env_vars):
+    p = tmp_path / "config.yaml"
+    p.write_text(
+        'channels:\n  - id: "@test"\n    name: "MyChan"\n    group: BadGroup\n'
+        "settings:\n  target_user_id: 123456789\n"
+    )
+    with pytest.raises(ValueError) as exc_info:
+        load_config(str(p))
+    assert "MyChan" in str(exc_info.value)
+    assert "BadGroup" in str(exc_info.value)
+
+
+@pytest.mark.unit
+def test_channel_group_null_yaml_is_none(tmp_path, mock_env_vars):
+    p = tmp_path / "config.yaml"
+    p.write_text(
+        'channels:\n  - id: "@test"\n    name: "Test"\n    group:\n'
+        "settings:\n  target_user_id: 123456789\n"
+    )
+    config = load_config(str(p))
+    assert config.channels[0].group is None
+
+
+# ---------------------------------------------------------------------------
+# PromptsConfig tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_prompts_config_missing_block_defaults(tmp_path, mock_env_vars):
+    p = tmp_path / "config.yaml"
+    p.write_text(
+        'channels:\n  - id: "@test"\n    name: "Test"\n' "settings:\n  target_user_id: 123456789\n"
+    )
+    config = load_config(str(p))
+    assert config.prompts == PromptsConfig()
+    assert config.prompts.base_template == "src/prompts/base_summary.txt"
+    assert config.prompts.composer == ""
+
+
+@pytest.mark.unit
+def test_prompts_config_explicit_values(tmp_path, mock_env_vars):
+    p = tmp_path / "config.yaml"
+    p.write_text(
+        'channels:\n  - id: "@test"\n    name: "Test"\n'
+        "settings:\n  target_user_id: 123456789\n"
+        "prompts:\n"
+        "  base_template: custom/my_template.txt\n"
+        "  composer: myapp.prompts.CustomComposer\n"
+    )
+    config = load_config(str(p))
+    assert config.prompts.base_template == "custom/my_template.txt"
+    assert config.prompts.composer == "myapp.prompts.CustomComposer"
+
+
+@pytest.mark.unit
+def test_prompts_config_not_mapping_raises(tmp_path, mock_env_vars):
+    p = tmp_path / "config.yaml"
+    p.write_text(
+        'channels:\n  - id: "@test"\n    name: "Test"\n'
+        "settings:\n  target_user_id: 123456789\n"
+        "prompts: true\n"
+    )
+    with pytest.raises(ValueError, match="'prompts' must be a mapping"):
+        load_config(str(p))
+
+
+@pytest.mark.unit
+def test_prompts_config_empty_base_template_raises(tmp_path, mock_env_vars):
+    p = tmp_path / "config.yaml"
+    p.write_text(
+        'channels:\n  - id: "@test"\n    name: "Test"\n'
+        "settings:\n  target_user_id: 123456789\n"
+        "prompts:\n  base_template: ''\n"
+    )
+    with pytest.raises(ValueError, match="base_template must be a non-empty string"):
+        load_config(str(p))
+
+
+@pytest.mark.unit
+def test_prompts_config_composer_not_string_raises(tmp_path, mock_env_vars):
+    p = tmp_path / "config.yaml"
+    p.write_text(
+        'channels:\n  - id: "@test"\n    name: "Test"\n'
+        "settings:\n  target_user_id: 123456789\n"
+        "prompts:\n  composer: 42\n"
+    )
+    with pytest.raises(ValueError, match="prompts.composer must be a string"):
+        load_config(str(p))
+
+
+@pytest.mark.unit
+def test_digest_group_config_equality_with_prompt_extra(tmp_path, mock_env_vars):
+    p = tmp_path / "config.yaml"
+    p.write_text(
+        'channels:\n  - id: "@test"\n    name: "Test"\n'
+        "settings:\n  target_user_id: 123456789\n"
+        "  digest_groups:\n"
+        "    - name: Events\n"
+        "      description: Conferences\n"
+        "      prompt_extra: Be concise.\n"
+    )
+    config = load_config(str(p))
+    assert config.settings.digest_groups[0] == DigestGroupConfig(
+        name="Events", description="Conferences", prompt_extra="Be concise."
+    )
+
+
+# ---------------------------------------------------------------------------
+# McpConfig tests
+# ---------------------------------------------------------------------------
+
+
+def _mcp_config_file(tmp_path, mcp_block: str) -> str:
+    content = f"""
+channels:
+  - id: "@test"
+    name: "Test"
+
+settings:
+  target_user_id: 123456789
+
+{mcp_block}
+"""
+    p = tmp_path / "config.yaml"
+    p.write_text(content)
+    return str(p)
+
+
+@pytest.mark.unit
+def test_mcp_config_missing_block_defaults(tmp_path, mock_env_vars):
+    """No mcp: block leaves the server disabled on loopback."""
+    config = load_config(_mcp_config_file(tmp_path, ""))
+    assert config.mcp == McpConfig()
+    assert config.mcp.enabled is False
+    assert config.mcp.host == "127.0.0.1"
+    assert config.mcp.port == 8765
+    assert config.mcp.path == "/mcp"
+
+
+@pytest.mark.unit
+def test_mcp_config_explicit(tmp_path, mock_env_vars):
+    """An explicit block is parsed field by field."""
+    block = """
+mcp:
+  enabled: true
+  host: "0.0.0.0"
+  port: 9000
+  path: "/telebrief"
+"""
+    config = load_config(_mcp_config_file(tmp_path, block))
+    assert config.mcp.enabled is True
+    assert config.mcp.host == "0.0.0.0"
+    assert config.mcp.port == 9000
+    assert config.mcp.path == "/telebrief"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "block,match",
+    [
+        ('mcp:\n  enabled: "yes"\n', "mcp.enabled must be a bool"),
+        ("mcp:\n  host: 123\n", "mcp.host must be a non-empty string"),
+        ('mcp:\n  host: "  "\n', "mcp.host must be a non-empty string"),
+        ("mcp:\n  port: 0\n", "mcp.port must be an int"),
+        ("mcp:\n  port: 70000\n", "mcp.port must be an int"),
+        ('mcp:\n  port: "8765"\n', "mcp.port must be an int"),
+        ('mcp:\n  path: "mcp"\n', "mcp.path must be a string starting"),
+        ("mcp: notamapping\n", "'mcp' must be a mapping"),
+    ],
+)
+def test_mcp_config_rejects_invalid(tmp_path, mock_env_vars, block, match):
+    """Malformed mcp blocks fail loudly at load time, not at request time."""
+    with pytest.raises(ValueError, match=match):
+        load_config(_mcp_config_file(tmp_path, block))
