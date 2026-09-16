@@ -179,16 +179,20 @@ async def main():
     if not await app.initialize():
         sys.exit(1)
 
-    # Set up signal handlers for graceful shutdown
+    # Set up signal handlers for graceful shutdown. Windows event loops do not support
+    # them; there Ctrl+C arrives as KeyboardInterrupt and the finally block shuts down.
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(sig, lambda: asyncio.create_task(app.shutdown()))
+        try:
+            loop.add_signal_handler(sig, lambda: asyncio.create_task(app.shutdown()))
+        except NotImplementedError:  # Windows event loops
+            break
 
     try:
         # Run application
         await app.run()
 
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, asyncio.CancelledError):
         pass
 
     except Exception as e:

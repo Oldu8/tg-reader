@@ -301,8 +301,11 @@ class BotCommandHandler:
         """Stop the bot."""
         if self.app and self.app.updater:
             self.logger.info("Stopping bot...")
-            await self.app.updater.stop()
-            await self.app.stop()
+            # Each step only if it got that far: startup may have failed half-way
+            if self.app.updater.running:
+                await self.app.updater.stop()
+            if self.app.running:
+                await self.app.stop()
             await self.app.shutdown()
 
 
