@@ -10,6 +10,7 @@ from typing import Optional
 from telegram import BotCommand, Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
+from src.chat_menu import ChatMenu
 from src.config_loader import Config
 from src.core import generate_and_send_digest
 from src.scheduler import DigestScheduler
@@ -40,6 +41,31 @@ class BotCommandHandler:
         self._ui = get_ui_strings(config.settings.output_language)
         self._command_timestamps: dict[int, float] = {}
 
+    @property
+    def _digest_enabled(self) -> bool:
+        return bool(self.config.channels)
+
+    @property
+    def _chats_enabled(self) -> bool:
+        return self.config.chat_summary.enabled
+
+    @property
+    def _russian(self) -> bool:
+        return self.config.settings.output_language == "Russian"
+
+    def _chat_help(self) -> str:
+        if self._russian:
+            return (
+                "📬 *Саммари любого чата*\n"
+                "/start или /chats — список чатов. Выбери чат и режим: непрочитанные "
+                "или последние N сообщений. Чтобы найти чат, просто пришли часть названия."
+            )
+        return (
+            "📬 *Summary of any chat*\n"
+            "/start or /chats lists your chats. Pick one and a mode: unread or the last N "
+            "messages. To find a chat, just send part of its name."
+        )
+
     def _is_rate_limited(self, user_id: int) -> bool:
         """Check if a user is rate-limited (30-second cooldown)."""
         now = time.monotonic()
@@ -58,15 +84,25 @@ class BotCommandHandler:
         Returns:
             Configured Application instance
         """
-        # Create application
-        self.app = Application.builder().token(self.config.telegram_bot_token).build()
+        # Create application. Updates are handled concurrently so that a slow step
+        # (loading the chat list, waiting for the Telegram session) never freezes the bot.
+        self.app = (
+            Application.builder()
+            .token(self.config.telegram_bot_token)
+            .concurrent_updates(True)
+            .build()
+        )
 
-        # Add command handlers
-        self.app.add_handler(CommandHandler("digest", self.handle_digest))
-        self.app.add_handler(CommandHandler("cleanup", self.handle_cleanup))
+        # Add command handlers; the digest commands only make sense with configured channels
+        if self._digest_enabled:
+            self.app.add_handler(CommandHandler("digest", self.handle_digest))
+            self.app.add_handler(CommandHandler("cleanup", self.handle_cleanup))
         self.app.add_handler(CommandHandler("status", self.handle_status))
         self.app.add_handler(CommandHandler("help", self.handle_help))
-        self.app.add_handler(CommandHandler("start", self.handle_help))
+        if self._chats_enabled:
+            ChatMenu(self.config, self.logger).register(self.app)  # owns /start and /chats
+        else:
+            self.app.add_handler(CommandHandler("start", self.handle_help))
 
         self.logger.info("Bot command handlers registered")
         return self.app
@@ -80,13 +116,15 @@ class BotCommandHandler:
             self.logger.warning("Application not initialized, cannot set up bot menu")
             return
 
-        commands = [
-            BotCommand("start", self._ui["cmd_start_desc"]),
-            BotCommand("digest", self._ui["cmd_digest_desc"]),
-            BotCommand("cleanup", self._ui["cmd_cleanup_desc"]),
-            BotCommand("status", self._ui["cmd_status_desc"]),
-            BotCommand("help", self._ui["cmd_help_desc"]),
-        ]
+        commands = [BotCommand("start", self._ui["cmd_start_desc"])]
+        if self._chats_enabled:
+            chats_desc = "Список чатов для саммари" if self._russian else "Chats to summarize"
+            commands.append(BotCommand("chats", chats_desc))
+        if self._digest_enabled:
+            commands.append(BotCommand("digest", self._ui["cmd_digest_desc"]))
+            commands.append(BotCommand("cleanup", self._ui["cmd_cleanup_desc"]))
+        commands.append(BotCommand("status", self._ui["cmd_status_desc"]))
+        commands.append(BotCommand("help", self._ui["cmd_help_desc"]))
 
         try:
             await self.app.bot.set_my_commands(commands)
@@ -257,7 +295,17 @@ class BotCommandHandler:
         if not self.is_authorized(user_id):
             return
 
-        help_text = (
+        if not self._digest_enabled:
+            help_text = (
+                f"{self._chat_help()}\n\n"
+                f"/status - {self._ui['cmd_status_desc']}\n"
+                f"/help - {self._ui['cmd_help_desc']}"
+            )
+            await update.message.reply_text(help_text, parse_mode="Markdown")
+            return
+
+        chat_part = f"{self._chat_help()}\n\n" if self._chats_enabled else ""
+        help_text = chat_part + (
             f"{self._ui['help_title']}\n\n"
             f"{self._ui['help_intro']}\n\n"
             f"{self._ui['help_commands_header']}\n\n"

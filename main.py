@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-Telebrief - Automated Telegram Digest Generator
+tg_brief (Telebrief fork) - AI summaries of your Telegram chats.
 
 Main entry point for the application.
-Starts the scheduler and bot command handler.
+Starts the bot (chat summaries, optional digest commands) and, when channels
+are configured, the daily digest scheduler.
 """
 
 import asyncio
@@ -11,11 +12,12 @@ import signal
 import sys
 from contextlib import suppress
 
-from src.config_loader import load_config
-from src.utils import setup_logging
-from src.scheduler import DigestScheduler
 from src.bot_commands import BotCommandHandler
+from src.config_loader import load_config
 from src.mcp_server import build_server
+from src.scheduler import DigestScheduler
+from src.telegram_session import TelegramSessionError, check_session_file
+from src.utils import setup_logging
 
 
 class TelebriefApp:
@@ -44,22 +46,29 @@ class TelebriefApp:
             self.logger.info("🚀 TELEBRIEF STARTING")
             self.logger.info("=" * 70)
 
+            # The Telegram user session is needed by every feature; fail fast without it
+            check_session_file()
+
             # Display configuration
-            self.logger.info(f"Configured channels: {len(self.config.channels)}")
+            settings = self.config.settings
+            chat_cfg = self.config.chat_summary
+            self.logger.info(f"Target user: {settings.target_user_id}")
+            self.logger.info(f"AI provider: {settings.ai_provider}, model: {settings.ai_model}")
+            if chat_cfg.enabled:
+                self.logger.info(
+                    f"Chat summaries: on (model: {chat_cfg.ai_model or settings.ai_model}, "
+                    f"modes: unread + last {chat_cfg.message_counts}, cap {chat_cfg.max_messages})"
+                )
+            self.logger.info(f"Configured digest channels: {len(self.config.channels)}")
             for ch in self.config.channels:
                 self.logger.info(f"  • {ch.name} ({ch.id})")
 
-            self.logger.info(
-                f"Schedule: Daily at {self.config.settings.schedule_time} {self.config.settings.timezone}"
-            )
-            self.logger.info(f"Target user: {self.config.settings.target_user_id}")
-            self.logger.info(
-                f"AI provider: {self.config.settings.ai_provider}, model: {self.config.settings.ai_model}"
-            )
-
-            # Initialize scheduler
-            self.logger.info("Initializing scheduler...")
-            self.scheduler = DigestScheduler(self.config, self.logger)
+            # Initialize scheduler (daily digest of configured channels only)
+            if self.config.channels:
+                self.logger.info(f"Schedule: Daily at {settings.schedule_time} {settings.timezone}")
+                self.scheduler = DigestScheduler(self.config, self.logger)
+            else:
+                self.logger.info("Daily digest: off (no channels configured)")
 
             # Initialize bot command handler
             self.logger.info("Initializing bot command handler...")
@@ -74,12 +83,15 @@ class TelebriefApp:
             self.logger.info("✅ Initialization complete")
             return True
 
+        except TelegramSessionError as e:
+            print(f"❌ {e}")
+            return False
+
         except FileNotFoundError as e:
             print(f"❌ Configuration error: {e}")
             print("\nPlease ensure:")
-            print("1. config.yaml exists and is properly configured")
-            print("2. .env file exists with required API credentials")
-            print("\nSee .env.example and SPECIFICATION.md for details.")
+            print("1. config.yaml exists (copy config.yaml.example and edit it)")
+            print("2. .env file exists with required API credentials (see .env.example)")
             return False
 
         except ValueError as e:
@@ -96,8 +108,9 @@ class TelebriefApp:
     async def run(self):
         """Run the application."""
         # Start scheduler
-        self.logger.info("Starting scheduler...")
-        self.scheduler.start()
+        if self.scheduler:
+            self.logger.info("Starting scheduler...")
+            self.scheduler.start()
 
         # Start bot
         self.logger.info("Starting bot command handler...")
@@ -120,15 +133,18 @@ class TelebriefApp:
         self.logger.info("=" * 70)
         self.logger.info("✅ TELEBRIEF IS RUNNING")
         self.logger.info("=" * 70)
-        self.logger.info("Scheduler: Active")
-        self.logger.info(f"Next digest: {self.scheduler.get_next_run_time()}")
+        if self.scheduler:
+            self.logger.info(f"Next digest: {self.scheduler.get_next_run_time()}")
         self.logger.info("Bot commands: Active")
         if self.mcp_task:
             mcp_cfg = self.config.mcp
             self.logger.info(f"MCP server: http://{mcp_cfg.host}:{mcp_cfg.port}{mcp_cfg.path}")
         self.logger.info("")
         self.logger.info("Available commands in Telegram:")
-        self.logger.info("  /digest - Generate digest instantly")
+        if self.config.chat_summary.enabled:
+            self.logger.info("  /start, /chats - Pick a chat and summarize it")
+        if self.config.channels:
+            self.logger.info("  /digest - Generate digest instantly")
         self.logger.info("  /status - Show status")
         self.logger.info("  /help - Show help")
         self.logger.info("")
@@ -217,8 +233,8 @@ if __name__ == "__main__":
 ║      ██║   ███████╗███████╗███████╗██████╔╝██║  ██║    ║
 ║      ╚═╝   ╚══════╝╚══════╝╚══════╝╚═════╝ ╚═╝  ╚═╝    ║
 ║                                                          ║
-║         Automated Telegram Digest Generator             ║
-║                   Powered by AI                          ║
+║        tg_brief: AI summaries of your Telegram          ║
+║              (based on Telebrief, MIT)                   ║
 ║                                                          ║
 ╚══════════════════════════════════════════════════════════╝
     """
