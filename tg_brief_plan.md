@@ -48,7 +48,7 @@
 |---|---|---|
 | User-client (Telethon) | `src/collector.py` | подключение к личному аккаунту, чтение сообщений по `entity` + `limit` |
 | Bot commands | `src/bot_commands.py` | polling, обработка команд, rate-limit, авторизация по `target_user_id` |
-| AI-саммари | `src/summarizer.py`, `src/ai_providers.py` | chunking + вызов OpenAI/Anthropic/Ollama |
+| AI-саммари | `src/summarizer.py`, `src/ai_providers.py` | вызов OpenAI/Anthropic/Ollama; чанкинга нет — старые сообщения просто отбрасываются по `max_prompt_chars` (поэтому для чатов написан свой `chat_summarizer.py`) |
 | Группировка по темам | `src/grouper.py` | AI-detected topics (аналог `topics[]` из раздела 7 старого плана) |
 | Форматирование вывода | `src/formatter.py` | Markdown, эмодзи, ссылки на сообщения |
 | Конфиг | `src/config_loader.py`, `config.yaml.example` | настройки, привязанные к `.env` |
@@ -136,26 +136,75 @@ End-to-end тест: /start → выбор чата → выбор режима 
 
 ## Текущий статус
 
-Сделано:
+### Эпик 1 — рабочий инструмент для себя
 
-- [x] Название проекта: `tg_brief`
-- [x] Создание Telegram application (my.telegram.org)
-- [x] `TELEGRAM_API_ID` получен
-- [x] `TELEGRAM_API_HASH` получен
-- [x] Telegram Bot создан через @BotFather, `TELEGRAM_BOT_TOKEN` получен
-- [x] Решение по стеку: форк Telebrief (Python/Telethon/python-telegram-bot) вместо Node/TS/TDLib
-- [x] Код Telebrief вендорен в репозиторий, лишнее (маркетинговый `website/`) удалено
-- [x] `.env` приведён к формату Telebrief, лишние MTProto-ключи убраны
-- [x] Локальный git-репозиторий инициализирован, baseline закоммичен
+Сделано (2026-09-16):
+
+- [x] Название проекта, Telegram application, `TELEGRAM_API_ID` / `TELEGRAM_API_HASH`, бот и токен
+- [x] Решение по стеку: форк Telebrief (Python/Telethon/python-telegram-bot)
+- [x] Код Telebrief вендорен, лишнее удалено, baseline закоммичен
+- [x] Окружение на Linux: `uv` + Python 3.14 + зависимости (`uv sync --extra dev`), тесты зелёные
+- [x] Список диалогов аккаунта: `src/chat_reader.py` (`list_dialogs`)
+- [x] Fetch по `unread` (через свежий `read_inbox_max_id`, без пометки «прочитано») и `last N`
+- [x] Ссылки на сообщения: каналы и супергруппы — да; личные чаты и обычные группы — Telegram их не даёт
+- [x] Саммари одного чата: `src/chat_summarizer.py` (один вызов модели, map-reduce только для очень больших выборок)
+- [x] Бот: `/start` → список чатов (непрочитанные / все / поиск текстом) → режим → живой статус → саммари
+- [x] Каналы в `config.yaml` больше не обязательны; ежедневный дайджест и `/digest` включаются только при их наличии
+- [x] Консольная проверка без бота: `python -m src.chat_cli list` / `summarize`
+- [x] `main.py` работает на Windows (нет `add_signal_handler`)
 
 Дальше:
 
-- [ ] Получить свой Telegram `user_id` через @userinfobot
-- [ ] Создать `config.yaml` из `config.yaml.example`, указать `target_user_id`
-- [ ] Установить зависимости проекта
-- [ ] Авторизовать личный Telegram-аккаунт (`create_session.py`) → `sessions/user.session`
-- [ ] Получить и вывести список диалогов (chat_id, title, type, unread_count)
-- [ ] Добавить inline-кнопки выбора чата и режима в `bot_commands.py`
-- [ ] Добавить fetch по `unread` / `last 100/500/1000` в `collector.py`
-- [ ] Связать fetch с `summarizer.py`/`grouper.py` для одного произвольного чата
-- [ ] End-to-end проверка сценария из раздела 0
+- [ ] Скопировать `.env` с Windows-машины в корень проекта
+- [ ] Узнать свой `user_id` (@userinfobot), создать `config.yaml` из примера, указать `target_user_id` и `timezone`
+- [ ] `uv run python create_session.py` → `sessions/user.session`
+- [ ] `uv run python -m src.chat_cli list --unread` — первая живая проверка user-client
+- [ ] `uv run python -m src.chat_cli summarize "<чат>" --last 100` — проверка саммари
+- [ ] `uv run python main.py` → end-to-end в боте
+- [ ] По итогам живого использования подобрать длину саммари, модель и лимиты
+
+### Принятые решения
+
+- **Большие выборки.** Один вызов модели, пока текст влезает в `single_call_chars`
+  (200K символов ≈ 80K токенов). 1000 обычных сообщений почти всегда влезают. Выше — части по
+  200K, из каждой заметки, потом итоговое саммари. Это и дешевле, и качественнее, чем резать
+  на части всегда: суммарный вход тот же, но модель видит весь контекст сразу.
+- **Ссылки не отправляются в модель.** Сообщения помечаются `#id`, модель цитирует `[#id]`,
+  бот сам превращает их в ссылки. Экономит примерно 35 символов на сообщение и не даёт модели
+  выдумать URL.
+- **Модель.** `chat_summary.ai_model: gpt-5-mini` — около $0.02–0.04 за 1000 сообщений.
+  `gpt-5-nano` примерно в 5 раз дешевле, но слабее на длинных русских чатах.
+- **Лимиты.** `max_messages` (по умолчанию 1000, потолок 5000) ограничивает все режимы,
+  включая «непрочитанные»; если непрочитанных больше, берутся самые новые, и бот об этом пишет.
+- **Один Telegram-клиент за раз.** Все обращения к аккаунту идут через общий lock
+  (`src/telegram_session.py`), чтобы не повредить файл сессии.
+
+### Запуск
+
+Linux:
+
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh   # один раз
+uv sync --extra dev
+cp config.yaml.example config.yaml                  # указать target_user_id, timezone
+uv run python create_session.py                     # один раз, интерактивный логин
+uv run python main.py
+```
+
+Windows (PowerShell):
+
+```powershell
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+uv sync --extra dev
+copy config.yaml.example config.yaml
+uv run python create_session.py
+uv run python main.py
+```
+
+### Эпик 2 — коммерческая версия (не сейчас, но учитывать)
+
+Текущий код single-tenant: одна сессия `sessions/user.session`, один `target_user_id`,
+один процессный lock, кэш диалогов в памяти бота. Новые модули уже принимают конфиг и
+диалог явно, без глобального состояния, так что многопользовательский слой (сессии в БД,
+логин через бота, очередь задач, лимиты и учёт токенов на пользователя) можно добавить
+поверх, не переписывая чтение и саммари.
