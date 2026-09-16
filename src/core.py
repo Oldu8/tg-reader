@@ -2,7 +2,6 @@
 Core digest generation function.
 """
 
-import asyncio
 import inspect
 import json
 import logging
@@ -19,6 +18,7 @@ from src.grouper import DigestGrouper
 from src.sender import DigestSender
 from src.storage import create_storage
 from src.summarizer import ERROR_SUMMARY_PREFIX, Summarizer
+from src.telegram_session import TELEGRAM_LOCK
 from src.ui_strings import get_ui_strings
 from src.utils import split_message
 
@@ -30,8 +30,8 @@ MAX_CHANNEL_MESSAGES = 500  # guards against a caller pulling a whole archive in
 
 # ponytail: one process-wide lock, not per-source; the scheduler, the bot and the
 # MCP server all build digests, and concurrent runs fight over the single
-# Telethon session file. Per-channel locking only if generation becomes a bottleneck.
-_digest_lock = asyncio.Lock()
+# Telethon session file. Shared with the chat summaries, which use the same session.
+_digest_lock = TELEGRAM_LOCK
 
 
 async def _save_to_storage(
