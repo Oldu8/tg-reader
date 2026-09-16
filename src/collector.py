@@ -28,6 +28,10 @@ class Message:
     channel_name: str
     has_media: bool
     media_type: str
+    message_id: int = 0
+    reply_to_id: int = 0
+    is_own: bool = False  # written by the account owner
+    mentions_me: bool = False  # mentions or replies to the account owner
 
 
 class MessageCollector:
