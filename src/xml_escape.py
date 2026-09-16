@@ -13,7 +13,7 @@ def escape_xml_delimiters(text: str) -> str:
     interference with normal message content.
     """
     text = re.sub(
-        r"</?(channel_messages|channel_summary)\b[^>]*>",
+        r"</?(channel_messages|channel_summary|chat_messages|chat_notes)\b[^>]*>",
         lambda m: m.group(0).replace("<", "&lt;").replace(">", "&gt;"),
         text,
         flags=re.IGNORECASE,
