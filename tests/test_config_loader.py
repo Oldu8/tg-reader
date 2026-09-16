@@ -106,10 +106,39 @@ settings:
 
 
 @pytest.mark.unit
-def test_load_config_no_channels(tmp_path, mock_env_vars):
-    """Test error handling for no channels configured."""
+def test_load_config_no_channels_allowed_with_chat_summary(tmp_path, mock_env_vars):
+    """Chat summaries (on by default) work without configured channels."""
     config_content = """
 channels: []
+
+settings:
+  target_user_id: 123456789
+"""
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(config_content)
+
+    config = load_config(str(config_file))
+
+    assert config.channels == []
+    assert config.chat_summary.enabled is True
+
+
+@pytest.mark.unit
+def test_load_config_missing_channels_key_allowed(tmp_path, mock_env_vars):
+    """The channels key may be omitted entirely."""
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text("settings:\n  target_user_id: 123456789\n")
+
+    assert load_config(str(config_file)).channels == []
+
+
+@pytest.mark.unit
+def test_load_config_no_channels_without_chat_summary(tmp_path, mock_env_vars):
+    """Without chat summaries there is nothing to do, so channels are required."""
+    config_content = """
+channels: []
+chat_summary:
+  enabled: false
 
 settings:
   target_user_id: 123456789

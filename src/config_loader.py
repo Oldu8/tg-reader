@@ -72,6 +72,23 @@ class McpConfig:
 
 
 @dataclass
+class ChatSummaryConfig:
+    """Configuration for on-demand summaries of any chat picked in the bot."""
+
+    enabled: bool = True
+    ai_model: str = ""  # empty = settings.ai_model
+    message_counts: List[int] = field(default_factory=lambda: [100, 500, 1000])
+    max_messages: int = 1000  # hard cap for every mode, unread included
+    max_message_chars: int = 1000  # longer messages are cut before reaching the AI
+    single_call_chars: int = 200_000  # prompt input above this is summarized in chunks
+    summary_max_chars: int = 8000  # target length of the final summary
+    max_output_tokens: int = 16_000  # includes reasoning tokens for reasoning models
+    reasoning_effort: str = "low"  # "" = do not send the parameter
+    api_timeout: int = 180
+    page_size: int = 8  # chats per page in the bot
+
+
+@dataclass
 class Settings:
     """Application settings."""
 
@@ -116,6 +133,7 @@ class Config:
     storage: StorageConfig = field(default_factory=StorageConfig)
     prompts: PromptsConfig = field(default_factory=PromptsConfig)
     mcp: McpConfig = field(default_factory=McpConfig)
+    chat_summary: ChatSummaryConfig = field(default_factory=ChatSummaryConfig)
 
 
 SUPPORTED_LANGUAGES = ("English", "Russian", "Spanish", "German", "French")
@@ -380,6 +398,79 @@ def _parse_mcp_config(yaml_config: dict) -> McpConfig:
     return McpConfig(enabled=enabled, host=host.strip(), port=port, path=path)
 
 
+MAX_CHAT_MESSAGES_HARD_LIMIT = 5000  # beyond this a single summary is slow and pointless
+_REASONING_EFFORTS = ("", "none", "minimal", "low", "medium", "high")
+
+
+def _positive_int(raw: dict, key: str, default: int, maximum: int | None = None) -> int:
+    value = raw.get(key, default)
+    if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+        raise ValueError(f"chat_summary.{key} must be a positive int, got {value!r}")
+    if maximum is not None and value > maximum:
+        raise ValueError(f"chat_summary.{key} must be <= {maximum}, got {value}")
+    return value
+
+
+def _parse_chat_summary_config(yaml_config: dict) -> ChatSummaryConfig:
+    """Parse and validate the optional top-level chat_summary: block.
+
+    Raises:
+        ValueError: If any field has wrong type or invalid value.
+    """
+    raw = yaml_config.get("chat_summary")
+    if raw is None:
+        return ChatSummaryConfig()
+    if not isinstance(raw, dict):
+        raise ValueError(f"'chat_summary' must be a mapping, got {type(raw).__name__}")
+
+    enabled = raw.get("enabled", True)
+    if not isinstance(enabled, bool):
+        raise ValueError(f"chat_summary.enabled must be a bool, got {type(enabled).__name__}")
+
+    ai_model = raw.get("ai_model", "") or ""
+    if not isinstance(ai_model, str):
+        raise ValueError(f"chat_summary.ai_model must be a string, got {ai_model!r}")
+
+    max_messages = _positive_int(raw, "max_messages", 1000, MAX_CHAT_MESSAGES_HARD_LIMIT)
+
+    counts = raw.get("message_counts", [100, 500, 1000])
+    if (
+        not isinstance(counts, list)
+        or not counts
+        or not all(isinstance(c, int) and not isinstance(c, bool) and c > 0 for c in counts)
+    ):
+        raise ValueError(
+            f"chat_summary.message_counts must be a non-empty list of positive ints, got {counts!r}"
+        )
+    too_big = [c for c in counts if c > max_messages]
+    if too_big:
+        raise ValueError(
+            f"chat_summary.message_counts {too_big} exceed chat_summary.max_messages={max_messages}"
+        )
+
+    effort = raw.get("reasoning_effort", "low")
+    if effort is None:
+        effort = ""
+    if effort not in _REASONING_EFFORTS:
+        raise ValueError(
+            f"chat_summary.reasoning_effort must be one of {_REASONING_EFFORTS}, got {effort!r}"
+        )
+
+    return ChatSummaryConfig(
+        enabled=enabled,
+        ai_model=ai_model.strip(),
+        message_counts=sorted(set(counts)),
+        max_messages=max_messages,
+        max_message_chars=_positive_int(raw, "max_message_chars", 1000),
+        single_call_chars=_positive_int(raw, "single_call_chars", 200_000),
+        summary_max_chars=_positive_int(raw, "summary_max_chars", 8000),
+        max_output_tokens=_positive_int(raw, "max_output_tokens", 16_000),
+        reasoning_effort=effort,
+        api_timeout=_positive_int(raw, "api_timeout", 180),
+        page_size=_positive_int(raw, "page_size", 8, 20),
+    )
+
+
 def _parse_prompts_config(yaml_config: dict) -> PromptsConfig:
     """Parse and validate the optional top-level prompts: block.
 
@@ -440,25 +531,33 @@ def _validate_channel_groups(
         )
 
 
-def _parse_channels(yaml_config: dict) -> List[ChannelConfig]:
+def _parse_channels(yaml_config: dict, allow_empty: bool = False) -> List[ChannelConfig]:
     """Parse and validate channel configs from YAML.
 
+    Args:
+        yaml_config: Parsed config.yaml
+        allow_empty: Accept an empty list (chat summaries work without configured channels)
+
     Raises:
-        ValueError: If channels list is empty, entries are invalid, or names are duplicated
+        ValueError: If channels list is empty (and not allowed), entries are invalid,
+            or names are duplicated
     """
     if not isinstance(yaml_config, dict):
         raise ValueError(
             f"config.yaml must contain a top-level mapping, got {type(yaml_config).__name__}"
         )
-    channels_value = yaml_config.get("channels", [])
+    channels_value = yaml_config.get("channels") or []
     if not isinstance(channels_value, list):
         raise ValueError(
             f"config.yaml field 'channels' must be a list, got {type(channels_value).__name__}"
         )
     channels = [_parse_channel_entry(i, ch) for i, ch in enumerate(channels_value)]
 
-    if not channels:
-        raise ValueError("No channels configured in config.yaml")
+    if not channels and not allow_empty:
+        raise ValueError(
+            "No channels configured in config.yaml "
+            "(add channels, or enable chat_summary to use the bot without them)"
+        )
 
     seen: set[str] = set()
     duplicates: set[str] = set()
@@ -542,8 +641,16 @@ def load_config(config_path: str = "config.yaml") -> Config:
     with open(config_path, "r", encoding="utf-8") as f:
         yaml_config = yaml.safe_load(f)
 
+    if not isinstance(yaml_config, dict):
+        raise ValueError(
+            f"config.yaml must contain a top-level mapping, got {type(yaml_config).__name__}"
+        )
+
+    # Parse chat summary config first: it decides whether channels may be empty
+    chat_summary_config = _parse_chat_summary_config(yaml_config)
+
     # Parse channels
-    channels = _parse_channels(yaml_config)
+    channels = _parse_channels(yaml_config, allow_empty=chat_summary_config.enabled)
 
     # Parse storage config
     storage_config = _parse_storage_config(yaml_config)
@@ -606,6 +713,7 @@ def load_config(config_path: str = "config.yaml") -> Config:
         storage=storage_config,
         prompts=prompts_config,
         mcp=mcp_config,
+        chat_summary=chat_summary_config,
         **env_vars,
     )
 

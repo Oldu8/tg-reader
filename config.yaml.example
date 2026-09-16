@@ -1,7 +1,27 @@
-# Telegram channels/chats to monitor
-channels:
-  - id: "@channelname"
-    name: "Example Channel"
+# On-demand summaries of any chat of your account (the main feature of tg_brief).
+# In the bot: /start → pick a chat → "unread" or "last N" → summary with links.
+chat_summary:
+  enabled: true
+  # Model for chat summaries; empty = settings.ai_model.
+  # gpt-5-mini is a good quality/price balance: ~1000 messages ≈ 80K input tokens ≈ $0.02-0.04.
+  # gpt-5-nano is ~5x cheaper but noticeably weaker on long Russian chats.
+  ai_model: "gpt-5-mini"
+  message_counts: [100, 500, 1000]  # "last N" buttons
+  max_messages: 1000         # cap for every mode, unread included (hard limit 5000)
+  max_message_chars: 1000    # longer messages are cut before reaching the AI
+  single_call_chars: 200000  # up to this much text → one AI call; above → split into parts
+                             # (~80K tokens for Russian; fits any current long-context model)
+  summary_max_chars: 8000    # target summary length (long summaries arrive as several messages)
+  max_output_tokens: 16000   # includes hidden reasoning tokens of gpt-5 models
+  reasoning_effort: "low"    # "" to not send it (non-reasoning models)
+  api_timeout: 180           # seconds per AI call; long chats take 30-120 s
+  page_size: 8               # chats per page in the bot
+
+# Telegram channels for the scheduled daily digest (optional, original Telebrief feature).
+# Leave empty to use only chat summaries; the scheduler and /digest are then disabled.
+channels: []
+  # - id: "@channelname"
+  #   name: "Example Channel"
     # group: Jobs              # optional — bind to a digest_groups entry (or "Other")
     # prompt_extra: ""         # optional — append extra instructions to this channel's AI prompt
     # lookback_hours: null     # optional — override global lookback_hours for this channel
@@ -21,8 +41,8 @@ channels:
 # Application settings
 settings:
   # Scheduling
-  schedule_time: "08:00"   # UTC time for daily digest
-  timezone: "UTC"
+  schedule_time: "08:00"   # daily digest time (only with channels configured)
+  timezone: "UTC"          # also used for message times in chat summaries, e.g. "Europe/Kyiv"
   lookback_hours: 24       # Message collection window
 
   # AI Provider: "openai", "ollama", or "anthropic"
