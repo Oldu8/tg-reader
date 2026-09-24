@@ -224,8 +224,8 @@ async def test_openai_provider_logs_response_metadata(mock_logger):
 
         assert result == "Valid response"
 
-        # Verify debug logging was called with response metadata
-        debug_messages = [str(call) for call in mock_logger.debug.call_args_list]
+        # Verify info logging was called with response metadata
+        debug_messages = [str(call) for call in mock_logger.info.call_args_list]
         debug_text = " ".join(debug_messages)
         assert "finish_reason" in debug_text
         assert "stop" in debug_text
@@ -1053,7 +1053,7 @@ async def test_anthropic_provider_logs_response_metadata(mock_logger):
 
     assert result == "Valid response"
 
-    debug_messages = [str(call) for call in mock_logger.debug.call_args_list]
+    debug_messages = [str(call) for call in mock_logger.info.call_args_list]
     debug_text = " ".join(debug_messages)
     assert "stop_reason" in debug_text
     assert "end_turn" in debug_text

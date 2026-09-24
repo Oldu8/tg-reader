@@ -98,7 +98,7 @@ class OpenAIProvider(AIProvider):
         refusal = getattr(choice.message, "refusal", None)
         usage = response.usage
 
-        self.logger.debug(
+        self.logger.info(
             "OpenAI response: finish_reason=%s prompt_tokens=%s "
             "completion_tokens=%s total_tokens=%s",
             finish_reason,
@@ -292,7 +292,7 @@ class AnthropicProvider(AIProvider):
 
         stop_reason = data.get("stop_reason")
         usage = data.get("usage") or {}
-        self.logger.debug(
+        self.logger.info(
             "Anthropic response: stop_reason=%s input_tokens=%s output_tokens=%s",
             stop_reason,
             usage.get("input_tokens"),
