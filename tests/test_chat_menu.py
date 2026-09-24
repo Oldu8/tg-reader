@@ -56,6 +56,7 @@ def reader():
     r = MagicMock()
     r.list_dialogs = AsyncMock(return_value=dialogs(n_read=5))
     r.fetch = AsyncMock()
+    r.mark_read = AsyncMock(return_value=0)
     return r
 
 
@@ -159,7 +160,7 @@ async def test_list_screen_unread_and_pagination(menu):
     text, kb = menu.list_screen("u", 0)
     rows = button_rows(kb)
     assert "Чаты с непрочитанными</b>: 2" in text
-    assert rows[0] == [("• 📬 Непрочитанные", "l:u:0"), ("📋 Все", "l:a:0")]
+    assert rows[0] == [("• 📬 Непрочит.", "l:u:0"), ("✅ Прочит.", "l:d:0"), ("📋 Все", "l:a:0")]
     assert rows[1] == [("📢 News · 1500", "c:-1001")]
     assert rows[2] == [("👤 Bob · 2", "c:42")]
     assert rows[-1] == [("🔄 Обновить список", "r:u")]
@@ -167,9 +168,21 @@ async def test_list_screen_unread_and_pagination(menu):
 
     text, kb = menu.list_screen("a", 1)
     rows = button_rows(kb)
-    assert rows[0][1][0] == "• 📋 Все"
+    assert rows[0][2][0] == "• 📋 Все"
     assert [r[0][1] for r in rows[1:4]] == ["c:-2001", "c:-2002", "c:-2003"]
     assert rows[4] == [("◀️", "l:a:0"), ("2/3", "x:"), ("▶️", "l:a:2")]
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_list_screen_read_chats(menu):
+    await menu._ensure_dialogs()
+    text, kb = menu.list_screen("d", 0)
+    rows = button_rows(kb)
+    assert "Прочитанные чаты</b>: 5" in text
+    assert rows[0][1] == ("• ✅ Прочит.", "l:d:0")
+    assert [r[0][1] for r in rows[1:4]] == ["c:-2000", "c:-2001", "c:-2002"]
+    assert rows[-1] == [("🔄 Обновить список", "r:d")]
 
 
 @pytest.mark.unit
@@ -208,24 +221,33 @@ def test_chat_screen_buttons(menu):
     news = dialogs()[0]
     text, kb = menu.chat_screen(news, "l:a:2")
     rows = button_rows(kb)
-    assert rows[0] == [("📬 Непрочитанные (1000+)", "m:-1001:u")]
+    assert rows[0] == [  # 1500 unread, more than the 1000 cap: no "all" button
+        ("📬 100", "m:-1001:u100"),
+        ("📬 500", "m:-1001:u500"),
+        ("📬 1000", "m:-1001:u1000"),
+    ]
     assert rows[1] == [
-        ("Последние 100", "m:-1001:100"),
-        ("Последние 500", "m:-1001:500"),
-        ("Последние 1000", "m:-1001:1000"),
+        ("🕘 100", "m:-1001:100"),
+        ("🕘 500", "m:-1001:500"),
+        ("🕘 1000", "m:-1001:1000"),
     ]
     assert rows[2] == [("⬅️ К списку", "l:a:2")]
+    assert "Непрочитанные по порядку" in text
     assert "Ссылок на сообщения не будет" not in text
 
     bob = dialogs()[1]
     text, kb = menu.chat_screen(bob, "l:u:0")
-    assert button_rows(kb)[0] == [("📬 Непрочитанные (2)", "m:42:u")]
+    assert button_rows(kb)[0] == [("📬 Все 2", "m:42:u1000")]
     assert "Ссылок на сообщения не будет" in text
+
+    some = DialogInfo(id=8, title="Some", kind=KIND_USER, unread_count=300)
+    _, kb = menu.chat_screen(some, "l:u:0")
+    assert button_rows(kb)[0] == [("📬 100", "m:8:u100"), ("📬 Все 300", "m:8:u1000")]
 
     quiet = DialogInfo(id=7, title="Quiet", kind=KIND_USER, archived=True)
     text, kb = menu.chat_screen(quiet, "l:u:0")
     assert button_rows(kb)[0][0][1] == "m:7:100"
-    assert "в архиве" in text
+    assert "в архиве" in text and "Непрочитанные по порядку" not in text
 
 
 # --------------------------------------------------------------------------- handlers
@@ -336,7 +358,9 @@ async def test_open_chat_and_unknown_chat(menu, reader):
 
 @pytest.mark.unit
 @pytest.mark.asyncio
-@pytest.mark.parametrize("data", ["c:abc", "m:42:zzz", "m:42:5000", "l:q:0"])
+@pytest.mark.parametrize(
+    "data", ["c:abc", "m:42:zzz", "m:42:5000", "m:42:u", "m:42:u5000", "m:42:u0", "l:q:0"]
+)
 async def test_stale_or_bad_buttons(menu, data):
     update = callback_update(data)
     await menu.on_callback(update, make_context())
@@ -359,13 +383,13 @@ async def test_noop_button(menu):
 
 @pytest.mark.unit
 @pytest.mark.asyncio
-async def test_summary_job_success(menu, reader, summarizer, monkeypatch):
+async def test_unread_job_summarizes_then_marks_read(menu, reader, summarizer, monkeypatch):
     monkeypatch.setattr(chat_menu, "HEARTBEAT_SECONDS", 3600)
     msgs = [message(1), message(2)]
 
     async def fake_fetch(dialog, mode, limit, progress=None):
-        await progress(100, 1000)
-        return FetchResult(msgs, mode, limit, unread_total=1500)
+        await progress(100, 100)
+        return FetchResult(msgs, mode, limit, unread_total=1500, last_id=3)
 
     async def fake_summarize(dialog, messages, progress=None):
         await progress(STAGE_MAP, 0, 2)
@@ -376,28 +400,87 @@ async def test_summary_job_success(menu, reader, summarizer, monkeypatch):
 
     reader.fetch.side_effect = fake_fetch
     summarizer.summarize.side_effect = fake_summarize
+    reader.mark_read.return_value = 1400
     ctx = make_context({"back": "l:u:0"})
 
-    await press(menu, "m:-1001:u", ctx)
+    await press(menu, "m:-1001:u100", ctx)
     assert menu._busy is None
 
     reader.fetch.assert_awaited_once()
-    assert reader.fetch.call_args.args[1:3] == (MODE_UNREAD, 1000)
+    assert reader.fetch.call_args.args[1:3] == (MODE_UNREAD, 100)
+    news = reader.fetch.call_args.args[0]
+    reader.mark_read.assert_awaited_once_with(news, 3)
     sends = ctx.bot.send_message.await_args_list
-    assert len(sends) >= 2
+    assert len(sends) >= 3
     first = sends[0].kwargs["text"]
     assert first.startswith("📢 <b>News</b>\n📬 Непрочитанные · 2 сообщения")
-    assert "⚠️ Непрочитанных 1500, взяты последние 1000." in first
+    assert "самые старые из 1500 непрочитанных" in first
     assert '<a href="https://t.me/c/1/1">🔗</a>' in first
     assert all(s.kwargs["reply_markup"] is None for s in sends[:-1])
-    assert button_rows(sends[-1].kwargs["reply_markup"]) == [
-        [("🔁 Этот чат", "c:-1001"), ("📋 К списку", "l:u:0")]
+    footer = sends[-1].kwargs
+    assert footer["text"] == "✔️ Отмечено прочитанным. Осталось непрочитанных: 1400."
+    assert button_rows(footer["reply_markup"]) == [
+        [("▶️ Следующие 100", "m:-1001:u100")],
+        [("🔁 Этот чат", "c:-1001"), ("📋 К списку", "l:u:0")],
     ]
     edits = [c.kwargs["text"] for c in ctx.bot.edit_message_text.await_args_list]
     assert any("Загружаю" in e for e in edits)
     assert any("готово частей 2 из 2" in e for e in edits)
     assert any("Собираю итоговое" in e for e in edits)
     assert "✅ Готово: 2 сообщения" in edits[-1]
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_last_n_job_does_not_mark_read(menu, reader, summarizer):
+    reader.fetch.return_value = FetchResult([message(1)], MODE_LAST, 100, last_id=1)
+    summarizer.summarize.return_value = ChatSummary("**Коротко:** x", {}, 1, 1, T0, T0)
+    ctx = make_context({"back": "l:d:0"})
+    await press(menu, "m:42:100", ctx)
+    reader.mark_read.assert_not_awaited()
+    sends = ctx.bot.send_message.await_args_list
+    assert len(sends) == 1
+    assert "🕘 Последние 100 · 1 сообщение" in sends[0].kwargs["text"]
+    assert button_rows(sends[0].kwargs["reply_markup"]) == [
+        [("🔁 Этот чат", "c:42"), ("📋 К списку", "l:d:0")]
+    ]
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "left, error, expected",
+    [
+        (0, None, "Непрочитанных больше нет"),
+        (None, RuntimeError("FLOOD <wait>"), "Не получилось отметить прочитанным"),
+    ],
+)
+async def test_unread_job_without_next_batch(menu, reader, summarizer, left, error, expected):
+    reader.fetch.return_value = FetchResult([message(1)], MODE_UNREAD, 100, 1, last_id=1)
+    summarizer.summarize.return_value = ChatSummary("x", {}, 1, 1, T0, T0)
+    reader.mark_read.return_value = left
+    reader.mark_read.side_effect = error
+    ctx = make_context()
+    await press(menu, "m:42:u100", ctx)
+    footer = ctx.bot.send_message.await_args_list[-1].kwargs
+    assert expected in footer["text"] and "<wait>" not in footer["text"]
+    assert button_rows(footer["reply_markup"]) == [
+        [("🔁 Этот чат", "c:42"), ("📋 К списку", "l:u:0")]
+    ]
+    assert menu._busy is None
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_unread_batch_of_service_messages_is_marked_read(menu, reader, summarizer):
+    reader.fetch.return_value = FetchResult([], MODE_UNREAD, 100, unread_total=3, last_id=7)
+    reader.mark_read.return_value = 0
+    ctx = make_context()
+    await press(menu, "m:42:u100", ctx)
+    summarizer.summarize.assert_not_awaited()
+    reader.mark_read.assert_awaited_once()
+    assert reader.mark_read.call_args.args[1] == 7
+    assert "Непрочитанных больше нет" in ctx.bot.send_message.call_args.kwargs["text"]
 
 
 @pytest.mark.unit
@@ -434,6 +517,7 @@ async def test_job_failure_is_reported(menu, reader, summarizer):
     assert "&lt;oops&gt;" in last["text"]
     assert last["reply_markup"] is not None
     assert menu._busy is None
+    reader.mark_read.assert_not_awaited()  # nothing delivered, nothing marked
 
 
 @pytest.mark.unit
@@ -441,7 +525,7 @@ async def test_job_failure_is_reported(menu, reader, summarizer):
 async def test_job_session_error_is_reported(menu, reader):
     reader.fetch.side_effect = TelegramSessionError("gone")
     ctx = make_context()
-    await press(menu, "m:42:u", ctx)
+    await press(menu, "m:42:u100", ctx)
     assert "create_session.py" in ctx.bot.edit_message_text.await_args_list[-1].kwargs["text"]
 
 

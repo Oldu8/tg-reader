@@ -1,14 +1,19 @@
 """
 Bot navigation for on-demand chat summaries.
 
-Flow: /start → list of chats (unread first, all, or search by sending text)
-→ chat screen → mode (unread / last N) → live status message → summary.
+Flow: /start → list of chats (unread, read, all, or search by sending text)
+→ chat screen → mode → live status message → summary.
+
+Modes:
+    next N unread  oldest unread first; marked as read once the summary is delivered,
+                   so pressing "next" again continues where the previous batch ended
+    last N         newest messages, read or not; the unread counter is not touched
 
 Callback data (Telegram allows 64 bytes):
-    l:<f>:<page>   chat list, f = u (unread) | a (all) | s (search results)
+    l:<f>:<page>   chat list, f = u (unread) | d (read) | a (all) | s (search results)
     r:<f>          reload dialogs from Telegram, then show list f
     c:<chat_id>    chat screen
-    m:<chat_id>:<mode>   summarize, mode = u (unread) | <N> (last N)
+    m:<chat_id>:<mode>   summarize, mode = u<N> (next N unread) | <N> (last N)
     x:             no-op (page counter button)
 """
 
@@ -55,6 +60,7 @@ SEARCH_MAX = 64
 NO_PREVIEW = LinkPreviewOptions(is_disabled=True)
 
 FILTER_UNREAD = "u"
+FILTER_READ = "d"
 FILTER_ALL = "a"
 FILTER_SEARCH = "s"
 
@@ -222,6 +228,8 @@ class ChatMenu:
     def _filtered(self, flt: str, query: str) -> list[DialogInfo]:
         if flt == FILTER_UNREAD:
             return [d for d in self._dialogs if d.unread_count > 0]
+        if flt == FILTER_READ:
+            return [d for d in self._dialogs if d.unread_count == 0]
         if flt == FILTER_SEARCH:
             q = query.casefold()
             return [
@@ -243,6 +251,9 @@ class ChatMenu:
         if flt == FILTER_UNREAD:
             title = f"📬 <b>Чаты с непрочитанными</b>: {len(items)}"
             empty = "Непрочитанных нет 🎉"
+        elif flt == FILTER_READ:
+            title = f"✅ <b>Прочитанные чаты</b>: {len(items)}"
+            empty = "Прочитанных чатов нет."
         elif flt == FILTER_SEARCH:
             title = f"🔎 <b>Поиск</b> «{html.escape(query)}»: {len(items)}"
             empty = "Ничего не нашлось."
@@ -254,12 +265,15 @@ class ChatMenu:
             lines.append(empty)
         lines.append("\nВыбери чат или пришли часть названия для поиска.")
 
-        unread_mark = "• " if flt == FILTER_UNREAD else ""
-        all_mark = "• " if flt == FILTER_ALL else ""
+        tabs = (
+            (FILTER_UNREAD, "📬 Непрочит."),
+            (FILTER_READ, "✅ Прочит."),
+            (FILTER_ALL, "📋 Все"),
+        )
         rows = [
             [
-                InlineKeyboardButton(f"{unread_mark}📬 Непрочитанные", callback_data="l:u:0"),
-                InlineKeyboardButton(f"{all_mark}📋 Все", callback_data="l:a:0"),
+                InlineKeyboardButton(f"{'• ' if f == flt else ''}{label}", callback_data=f"l:{f}:0")
+                for f, label in tabs
             ]
         ]
         for d in items[page * size : (page + 1) * size]:
@@ -290,23 +304,37 @@ class ChatMenu:
                 "\nℹ️ Ссылок на сообщения не будет: Telegram не даёт их "
                 "для личных чатов и обычных групп."
             )
-        lines.append("\nЧто суммировать?")
-
         rows = []
         if d.unread_count:
-            cap = self.cfg.max_messages
-            shown = f"{cap}+" if d.unread_count > cap else str(d.unread_count)
-            rows.append(
-                [InlineKeyboardButton(f"📬 Непрочитанные ({shown})", callback_data=f"m:{d.id}:u")]
+            lines.append(
+                "\n📬 <b>Непрочитанные по порядку</b>: с первого непрочитанного. "
+                "После саммари они отмечаются прочитанными."
             )
+            rows.append(self._unread_buttons(d))
+        lines.append("\n🕘 <b>Последние</b>: самые свежие сообщения, счётчик не меняется.")
         rows.append(
             [
-                InlineKeyboardButton(f"Последние {n}", callback_data=f"m:{d.id}:{n}")
+                InlineKeyboardButton(f"🕘 {n}", callback_data=f"m:{d.id}:{n}")
                 for n in self.cfg.message_counts
             ]
         )
         rows.append([InlineKeyboardButton("⬅️ К списку", callback_data=back)])
         return "\n".join(lines), InlineKeyboardMarkup(rows)
+
+    def _unread_buttons(self, d: DialogInfo) -> list[InlineKeyboardButton]:
+        """Next-N-unread buttons; "all" replaces sizes that would take every unread anyway."""
+        buttons = [
+            InlineKeyboardButton(f"📬 {n}", callback_data=f"m:{d.id}:u{n}")
+            for n in self.cfg.message_counts
+            if n < d.unread_count
+        ]
+        if d.unread_count <= self.cfg.max_messages:
+            buttons.append(
+                InlineKeyboardButton(
+                    f"📬 Все {d.unread_count}", callback_data=f"m:{d.id}:u{self.cfg.max_messages}"
+                )
+            )
+        return buttons
 
     # ------------------------------------------------------------------ handlers
 
@@ -374,7 +402,7 @@ class ChatMenu:
         query = update.callback_query
         assert query is not None
         flt, _, page_s = rest.partition(":")
-        if flt not in (FILTER_UNREAD, FILTER_ALL, FILTER_SEARCH):
+        if flt not in (FILTER_UNREAD, FILTER_READ, FILTER_ALL, FILTER_SEARCH):
             raise ValueError(flt)
         page = int(page_s or 0)
         search = (context.user_data or {}).get("query", "")
@@ -417,12 +445,12 @@ class ChatMenu:
     ) -> None:
         query = update.callback_query
         assert query is not None and query.message is not None
-        if mode_s == "u":
-            mode, limit = MODE_UNREAD, self.cfg.max_messages
+        if mode_s.startswith("u"):
+            mode, limit = MODE_UNREAD, int(mode_s[1:])
         else:
             mode, limit = MODE_LAST, int(mode_s)
-            if not 1 <= limit <= self.cfg.max_messages:
-                raise ValueError(mode_s)
+        if not 1 <= limit <= self.cfg.max_messages:
+            raise ValueError(mode_s)
         if self._busy is not None:
             await query.answer(f"Уже делаю саммари «{self._busy}», подожди", show_alert=True)
             return
@@ -459,16 +487,13 @@ class ChatMenu:
         limit: int,
         back: str,
     ) -> None:
-        done_kb = InlineKeyboardMarkup(
-            [
-                [
-                    InlineKeyboardButton("🔁 Этот чат", callback_data=f"c:{dialog.id}"),
-                    InlineKeyboardButton("📋 К списку", callback_data=back),
-                ]
-            ]
-        )
+        nav_row = [
+            InlineKeyboardButton("🔁 Этот чат", callback_data=f"c:{dialog.id}"),
+            InlineKeyboardButton("📋 К списку", callback_data=back),
+        ]
+        done_kb = InlineKeyboardMarkup([nav_row])
         try:
-            what = "непрочитанные" if mode == MODE_UNREAD else f"последние {limit}"
+            what = "непрочитанные по порядку" if mode == MODE_UNREAD else f"последние {limit}"
             await status.stage(f"📥 Загружаю {what}…", force=True)
             status.start_heartbeat()
 
@@ -477,8 +502,7 @@ class ChatMenu:
 
             fetched = await self.reader.fetch(dialog, mode, limit, progress=on_fetch)
             if not fetched.messages:
-                empty = "Непрочитанных нет." if mode == MODE_UNREAD else "Сообщений нет."
-                await status.finish(f"🤷 {empty}", done_kb)
+                await self._finish_empty(bot, chat_id, status, dialog, fetched, nav_row)
                 return
 
             count = len(fetched.messages)
@@ -500,10 +524,15 @@ class ChatMenu:
             summary = await summarizer.summarize(dialog, fetched.messages, progress=on_summary)
 
             intro = self._summary_intro(dialog, mode, count, summary, fetched)
-            await self._send_summary(bot, chat_id, intro, summary.text, summary.links, done_kb)
+            unread = mode == MODE_UNREAD
+            await self._send_summary(
+                bot, chat_id, intro, summary.text, summary.links, None if unread else done_kb
+            )
             await status.finish(
                 f"✅ Готово: {messages_word(count)} за {status.elapsed} c. Саммари ниже ⬇️"
             )
+            if unread:
+                await self._mark_read(bot, chat_id, dialog, fetched, nav_row)
         except TelegramSessionError as e:
             self.logger.error(f"Telegram session problem: {e}")
             await status.finish(self._error_text(e), done_kb)
@@ -513,6 +542,55 @@ class ChatMenu:
         finally:
             await status.stop()
             self._busy = None
+
+    async def _finish_empty(  # pylint: disable=too-many-positional-arguments
+        self,
+        bot,
+        chat_id: int,
+        status: StatusMessage,
+        dialog: DialogInfo,
+        fetched: FetchResult,
+        nav_row: list[InlineKeyboardButton],
+    ) -> None:
+        """Nothing to summarize; an unread batch of joins, pins or own messages is still read."""
+        if fetched.mode == MODE_UNREAD and fetched.last_id:
+            await status.finish("🤷 Только служебные сообщения, саммари не нужно.")
+            await self._mark_read(bot, chat_id, dialog, fetched, nav_row)
+            return
+        empty = "Непрочитанных нет." if fetched.mode == MODE_UNREAD else "Сообщений нет."
+        await status.finish(f"🤷 {empty}", InlineKeyboardMarkup([nav_row]))
+
+    async def _mark_read(
+        self,
+        bot,
+        chat_id: int,
+        dialog: DialogInfo,
+        fetched: FetchResult,
+        nav_row: list[InlineKeyboardButton],
+    ) -> None:
+        """Mark the summarized batch as read and offer the next one."""
+        rows = [nav_row]
+        try:
+            left = await self.reader.mark_read(dialog, fetched.last_id)
+        except Exception as e:  # the summary is already delivered; only the counter failed
+            self.logger.error(f"Mark read failed for {dialog.title!r}: {e}", exc_info=True)
+            text = (
+                "⚠️ Не получилось отметить прочитанным, счётчик не изменился.\n"
+                f"{html.escape(str(e))[:300] or type(e).__name__}"
+            )
+        else:
+            if left == 0:
+                text = "✔️ Отмечено прочитанным. Непрочитанных больше нет 🎉"
+            else:
+                text = "✔️ Отмечено прочитанным."
+                if left is not None:
+                    text += f" Осталось непрочитанных: {left}."
+                next_btn = InlineKeyboardButton(
+                    f"▶️ Следующие {fetched.limit}",
+                    callback_data=f"m:{dialog.id}:u{fetched.limit}",
+                )
+                rows.insert(0, [next_btn])
+        await self._send_html(bot, chat_id, text, InlineKeyboardMarkup(rows))
 
     def _summary_intro(
         self,
@@ -533,7 +611,8 @@ class ChatMenu:
             lines[-1] += f" · {start} – {end}"
         if fetched.capped:
             lines.append(
-                f"⚠️ Непрочитанных {fetched.unread_total}, взяты последние {fetched.limit}."
+                f"Это самые старые из {fetched.unread_total} непрочитанных, "
+                "дальше — кнопка «Следующие»."
             )
         return "\n".join(lines)
 
@@ -544,7 +623,7 @@ class ChatMenu:
         intro: str,
         text: str,
         links: dict[int, str],
-        keyboard: InlineKeyboardMarkup,
+        keyboard: Optional[InlineKeyboardMarkup],
     ) -> None:
         parts = split_parts(text) or ["(модель вернула пустой ответ)"]
         for i, part in enumerate(parts):
