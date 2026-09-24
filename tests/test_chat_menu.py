@@ -10,7 +10,16 @@ from telegram.error import BadRequest
 
 from src import chat_menu
 from src.chat_menu import ChatMenu, StatusMessage, messages_word, short_title
-from src.chat_reader import KIND_CHANNEL, KIND_USER, MODE_LAST, MODE_UNREAD, DialogInfo, FetchResult
+from src.chat_reader import (
+    KIND_CHANNEL,
+    KIND_SUPERGROUP,
+    KIND_USER,
+    MODE_LAST,
+    MODE_UNREAD,
+    DialogInfo,
+    FetchResult,
+    TopicInfo,
+)
 from src.chat_summarizer import STAGE_MAP, STAGE_REDUCE, ChatSummary
 from src.collector import Message
 from src.config_loader import ChatSummaryConfig
@@ -30,6 +39,21 @@ def dialogs(n_read=0):
         for i in range(n_read)
     ]
     return unread + read
+
+
+def forum():
+    return DialogInfo(
+        id=-3000, title="Forum", kind=KIND_SUPERGROUP, unread_count=60, peer_id=3000, forum=True
+    )
+
+
+def topics(n_extra=0):
+    main = [
+        TopicInfo(id=1, title="General", unread_count=51, read_inbox_max_id=10),
+        TopicInfo(id=5, title="Жильё", unread_count=9),
+        TopicInfo(id=8, title="Архив", closed=True),
+    ]
+    return main + [TopicInfo(id=100 + i, title=f"T{i}") for i in range(n_extra)]
 
 
 def message(i):
@@ -57,6 +81,7 @@ def reader():
     r.list_dialogs = AsyncMock(return_value=dialogs(n_read=5))
     r.fetch = AsyncMock()
     r.mark_read = AsyncMock(return_value=0)
+    r.list_topics = AsyncMock(return_value=topics())
     return r
 
 
@@ -359,7 +384,19 @@ async def test_open_chat_and_unknown_chat(menu, reader):
 @pytest.mark.unit
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "data", ["c:abc", "m:42:zzz", "m:42:5000", "m:42:u", "m:42:u5000", "m:42:u0", "l:q:0"]
+    "data",
+    [
+        "c:abc",
+        "m:42:zzz",
+        "m:42:5000",
+        "m:42:u",
+        "m:42:u5000",
+        "m:42:u0",
+        "m:42:u100:x",
+        "m:42:u100:1:2",
+        "t:42:x",
+        "l:q:0",
+    ],
 )
 async def test_stale_or_bad_buttons(menu, data):
     update = callback_update(data)
@@ -387,7 +424,7 @@ async def test_unread_job_summarizes_then_marks_read(menu, reader, summarizer, m
     monkeypatch.setattr(chat_menu, "HEARTBEAT_SECONDS", 3600)
     msgs = [message(1), message(2)]
 
-    async def fake_fetch(dialog, mode, limit, progress=None):
+    async def fake_fetch(dialog, mode, limit, progress=None, topic=None):
         await progress(100, 100)
         return FetchResult(msgs, mode, limit, unread_total=1500, last_id=3)
 
@@ -409,7 +446,7 @@ async def test_unread_job_summarizes_then_marks_read(menu, reader, summarizer, m
     reader.fetch.assert_awaited_once()
     assert reader.fetch.call_args.args[1:3] == (MODE_UNREAD, 100)
     news = reader.fetch.call_args.args[0]
-    reader.mark_read.assert_awaited_once_with(news, 3)
+    reader.mark_read.assert_awaited_once_with(news, 3, topic=None)
     sends = ctx.bot.send_message.await_args_list
     assert len(sends) >= 3
     first = sends[0].kwargs["text"]
@@ -588,3 +625,101 @@ async def test_status_heartbeat_refreshes(monkeypatch):
     await status.stop()
     assert status._ticker is None
     assert bot.edit_message_text.await_count >= 1
+
+
+# --------------------------------------------------------------------------- forum topics
+
+
+@pytest.fixture
+def forum_menu(menu, reader):
+    reader.list_dialogs.return_value = [forum()] + dialogs()
+    return menu
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_forum_screen_lists_topics(forum_menu, reader):
+    reader.list_topics.return_value = topics(n_extra=2)  # 5 topics, page size 3
+    ctx = make_context({"back": "l:u:0"})
+    update = await press(forum_menu, "c:-3000", ctx)
+    call = update.callback_query.edit_message_text.call_args
+    rows = button_rows(call.kwargs["reply_markup"])
+    assert "🗂 <b>Forum</b>" in call.args[0]
+    assert "Непрочитанных во всех ветках: 60" in call.args[0]
+    assert rows[:3] == [
+        [("# General · 51", "t:-3000:1")],
+        [("# Жильё · 9", "t:-3000:5")],
+        [("🔒 Архив", "t:-3000:8")],
+    ]
+    assert rows[3] == [("◀️", "c:-3000:1"), ("1/2", "x:"), ("▶️", "c:-3000:1")]
+    assert rows[4] == [
+        ("🕘 100", "m:-3000:100"),
+        ("🕘 500", "m:-3000:500"),
+        ("🕘 1000", "m:-3000:1000"),
+    ]
+    assert rows[5] == [("⬅️ К списку", "l:u:0")]
+
+    update = await press(forum_menu, "c:-3000:1", ctx)
+    rows = button_rows(update.callback_query.edit_message_text.call_args.kwargs["reply_markup"])
+    assert rows[0] == [("# T0", "t:-3000:100")]
+    assert reader.list_topics.await_count == 1  # cached
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_forum_topics_load_error_offers_retry(forum_menu, reader):
+    reader.list_topics.side_effect = RuntimeError("TOPICS <down>")
+    update = await press(forum_menu, "c:-3000", make_context())
+    call = update.callback_query.edit_message_text.call_args
+    assert "&lt;down&gt;" in call.args[0]
+    assert button_rows(call.kwargs["reply_markup"]) == [[("🔄 Повторить", "c:-3000")]]
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_topic_screen(forum_menu):
+    update = await press(forum_menu, "t:-3000:1", make_context())
+    call = update.callback_query.edit_message_text.call_args
+    rows = button_rows(call.kwargs["reply_markup"])
+    assert call.args[0].startswith("🗂 <b>Forum</b> › # <b>General</b>\nНепрочитанных: 51")
+    assert rows[0] == [("📬 Все 51", "m:-3000:u1000:1")]
+    assert rows[1] == [
+        ("🕘 100", "m:-3000:100:1"),
+        ("🕘 500", "m:-3000:500:1"),
+        ("🕘 1000", "m:-3000:1000:1"),
+    ]
+    assert rows[2] == [("⬅️ К веткам", "c:-3000")]
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+@pytest.mark.parametrize("data", ["t:-3000:999", "t:42:1", "m:-3000:u100:999"])
+async def test_unknown_topic(forum_menu, data):
+    update = await press(forum_menu, data, make_context())
+    alert = update.callback_query.answer.await_args.args[0]
+    assert "не найден" in alert
+    assert forum_menu._busy is None
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_topic_job_reads_and_marks_the_topic(forum_menu, reader, summarizer):
+    reader.fetch.return_value = FetchResult(
+        [message(11)], MODE_UNREAD, 100, unread_total=150, last_id=12
+    )
+    summarizer.summarize.return_value = ChatSummary("x", {}, 1, 1, T0, T0)
+    reader.mark_read.return_value = 50
+    ctx = make_context({"back": "l:u:0"})
+    await press(forum_menu, "m:-3000:u100:1", ctx)
+
+    dialog = reader.fetch.call_args.args[0]
+    topic = reader.fetch.call_args.kwargs["topic"]
+    assert (dialog.id, topic.id) == (-3000, 1)
+    assert summarizer.summarize.call_args.args[0].title == "Forum / General"
+    reader.mark_read.assert_awaited_once_with(dialog, 12, topic=topic)
+    sends = ctx.bot.send_message.await_args_list
+    assert sends[0].kwargs["text"].startswith("🗂 <b>Forum</b> › # <b>General</b>\n📬")
+    assert button_rows(sends[-1].kwargs["reply_markup"]) == [
+        [("▶️ Следующие 100", "m:-3000:u100:1")],
+        [("🔁 Эта ветка", "t:-3000:1"), ("📋 К списку", "l:u:0")],
+    ]
