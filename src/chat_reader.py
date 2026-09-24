@@ -3,8 +3,9 @@ Reads any chat of the personal Telegram account on demand.
 
 Unlike MessageCollector, which walks the channels listed in config.yaml over a
 time window, this module lists every dialog of the account and fetches either the
-last N messages or the unread ones of the dialog the user picked in the bot.
-Nothing is marked as read.
+last N messages (newest ones) or the next N unread ones (oldest unread first) of the
+dialog the user picked in the bot. Fetching never marks anything as read; the bot
+calls mark_read explicitly once the summary of an unread batch is delivered.
 """
 
 import logging
@@ -70,11 +71,12 @@ class FetchResult:
     messages: list[Message]  # chronological order
     mode: str
     limit: int
-    unread_total: int = 0  # unread count reported by Telegram (unread mode only)
+    unread_total: int = 0  # unread count reported by Telegram before the fetch (unread mode)
+    last_id: int = 0  # newest message id scanned, service and skipped messages included
 
     @property
     def capped(self) -> bool:
-        """Unread messages exist beyond the cap and were left out."""
+        """More unread messages exist than this batch took."""
         return self.mode == MODE_UNREAD and self.unread_total > self.limit
 
 
@@ -173,8 +175,9 @@ class ChatReader:
 
         Args:
             dialog: Dialog picked by the user
-            mode: MODE_UNREAD or MODE_LAST
-            limit: Maximum number of messages; the newest ones are kept
+            mode: MODE_UNREAD (the oldest `limit` unread messages) or
+                MODE_LAST (the newest `limit` messages, read or not)
+            limit: Maximum number of messages to scan
             progress: Awaited as progress(fetched, expected) every PROGRESS_EVERY messages
 
         Raises:
@@ -191,6 +194,7 @@ class ChatReader:
             min_id = 0
             unread_total = 0
             expected = limit
+            oldest_first = mode == MODE_UNREAD
             if mode == MODE_UNREAD:
                 min_id, unread_total = await self._fresh_unread_state(client, dialog)
                 if unread_total == 0:
@@ -199,20 +203,51 @@ class ChatReader:
 
             messages: list[Message] = []
             seen = 0
-            async for raw in client.iter_messages(dialog.entity, limit=limit, min_id=min_id):
+            last_id = 0
+            async for raw in client.iter_messages(
+                dialog.entity, limit=limit, min_id=min_id, reverse=oldest_first
+            ):
                 seen += 1
+                last_id = max(last_id, raw.id)
                 converted = self._convert(raw, dialog, my_id, skip_own=mode == MODE_UNREAD)
                 if converted is not None:
                     messages.append(converted)
                 if progress and seen % PROGRESS_EVERY == 0:
                     await progress(seen, expected)
 
-        messages.reverse()  # Telegram returns newest first
+        if not oldest_first:
+            messages.reverse()  # Telegram returns newest first
         self.logger.info(
             f"Fetched {len(messages)} messages from {dialog.title!r} "
             f"(mode={mode}, limit={limit}, scanned={seen})"
         )
-        return FetchResult(messages, mode, limit, unread_total)
+        return FetchResult(messages, mode, limit, unread_total, last_id)
+
+    async def mark_read(self, dialog: DialogInfo, max_id: int) -> Optional[int]:
+        """Mark messages up to max_id as read, like opening the chat and scrolling to it.
+
+        Updates the dialog's cached unread state.
+
+        Returns:
+            Unread messages left, or None when Telegram did not report the new count
+
+        Raises:
+            ValueError: On max_id <= 0 (Telegram treats 0 as "the whole chat")
+        """
+        if max_id <= 0:
+            raise ValueError(f"max_id must be positive, got {max_id}")
+        async with user_client(self.config) as client:
+            await client.send_read_acknowledge(dialog.entity, max_id=max_id)
+            state = await self._peer_state(client, dialog)
+        dialog.read_inbox_max_id = max(dialog.read_inbox_max_id, max_id)
+        if state is None:
+            self.logger.info(f"Marked {dialog.title!r} read up to #{max_id}")
+            return None
+        dialog.read_inbox_max_id, dialog.unread_count = state
+        self.logger.info(
+            f"Marked {dialog.title!r} read up to #{max_id}, {dialog.unread_count} unread left"
+        )
+        return dialog.unread_count
 
     async def _fresh_unread_state(
         self, client: TelegramClient, dialog: DialogInfo
@@ -221,14 +256,22 @@ class ChatReader:
 
         The dialog list in the bot may be minutes old; the user could have read the chat since.
         """
+        state = await self._peer_state(client, dialog)
+        if state is None:  # stale numbers are still a usable answer
+            return dialog.read_inbox_max_id, dialog.unread_count
+        return state
+
+    async def _peer_state(
+        self, client: TelegramClient, dialog: DialogInfo
+    ) -> Optional[tuple[int, int]]:
         try:
             peer = await client.get_input_entity(dialog.entity)
             result = await client(GetPeerDialogsRequest(peers=[types.InputDialogPeer(peer=peer)]))
             fresh = result.dialogs[0]
             return fresh.read_inbox_max_id or 0, fresh.unread_count or 0
-        except Exception as e:  # stale numbers are still a usable answer
-            self.logger.warning(f"Could not refresh unread state of {dialog.title!r}: {e}")
-            return dialog.read_inbox_max_id, dialog.unread_count
+        except Exception as e:
+            self.logger.warning(f"Could not get unread state of {dialog.title!r}: {e}")
+            return None
 
     def _convert(
         self, raw: Any, dialog: DialogInfo, my_id: int, skip_own: bool

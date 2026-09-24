@@ -75,7 +75,9 @@ def main() -> None:
     sum_cmd.add_argument("query", help="chat title or part of it")
     group = sum_cmd.add_mutually_exclusive_group()
     group.add_argument("--last", type=int, default=100, help="last N messages (default 100)")
-    group.add_argument("--unread", action="store_true", help="unread messages")
+    group.add_argument(
+        "--unread", action="store_true", help="oldest unread first (not marked as read)"
+    )
     args = parser.parse_args()
 
     config = load_config()

@@ -81,6 +81,7 @@ class FakeClient:
         self._fresh = fresh
         self._fresh_error = fresh_error
         self.iter_calls = []
+        self.acks = []
 
     async def get_me(self):
         return SimpleNamespace(id=ME)
@@ -96,11 +97,17 @@ class FakeClient:
             dialogs=[SimpleNamespace(read_inbox_max_id=read_max, unread_count=unread)]
         )
 
-    async def iter_messages(self, entity, limit=None, min_id=0):
-        self.iter_calls.append({"limit": limit, "min_id": min_id})
-        picked = [m for m in sorted(self._messages, key=lambda m: -m.id) if m.id > min_id]
+    async def iter_messages(self, entity, limit=None, min_id=0, reverse=False):
+        self.iter_calls.append({"limit": limit, "min_id": min_id, "reverse": reverse})
+        picked = sorted(
+            (m for m in self._messages if m.id > min_id), key=lambda m: m.id if reverse else -m.id
+        )
         for m in picked[:limit]:
             yield m
+
+    async def send_read_acknowledge(self, entity, max_id=None):
+        self.acks.append(max_id)
+        return True
 
     async def iter_dialogs(self):
         for d in self._dialogs:
@@ -269,7 +276,8 @@ async def test_fetch_last_n_chronological_with_conversion(reader, patch_client, 
     assert media.text == "[Фото]" and media.has_media
     assert mine.sender == "ME" and mine.is_own
     assert ping.mentions_me and ping.reply_to_id == 5
-    assert client.iter_calls == [{"limit": 10, "min_id": 0}]
+    assert client.iter_calls == [{"limit": 10, "min_id": 0, "reverse": False}]
+    assert result.last_id == 6
     progress.assert_not_awaited()  # fewer than PROGRESS_EVERY messages
 
 
@@ -283,7 +291,8 @@ async def test_fetch_unread_uses_fresh_state_and_skips_own(reader, patch_client,
 
     assert [m.message_id for m in result.messages] == [5, 6, 7]
     assert result.unread_total == 3 and not result.capped
-    assert client.iter_calls == [{"limit": 1000, "min_id": 4}]
+    assert result.last_id == 8  # own message is skipped but still covered by "read up to"
+    assert client.iter_calls == [{"limit": 1000, "min_id": 4, "reverse": True}]
 
 
 @pytest.mark.unit
@@ -300,20 +309,47 @@ async def test_fetch_unread_falls_back_to_cached_state(reader, patch_client, sup
     messages = [raw_message(i) for i in range(1, 5)]
     client = patch_client(FakeClient(messages, fresh_error=RuntimeError("boom")))
     result = await reader.fetch(supergroup, MODE_UNREAD, 100)
-    assert client.iter_calls == [{"limit": 100, "min_id": 2}]
+    assert client.iter_calls == [{"limit": 100, "min_id": 2, "reverse": True}]
     assert [m.message_id for m in result.messages] == [3, 4]
 
 
 @pytest.mark.unit
 @pytest.mark.asyncio
-async def test_fetch_unread_capped_and_progress(reader, patch_client, supergroup):
+async def test_fetch_unread_takes_oldest_batch(reader, patch_client, supergroup):
     messages = [raw_message(i) for i in range(1, 251)]
     patch_client(FakeClient(messages, fresh=(0, 250)))
     progress = AsyncMock()
     result = await reader.fetch(supergroup, MODE_UNREAD, 200, progress=progress)
     assert len(result.messages) == 200 and result.capped
-    assert result.messages[0].message_id == 51  # newest 200 kept
+    assert [result.messages[0].message_id, result.messages[-1].message_id] == [1, 200]
+    assert result.last_id == 200  # the next batch starts at 201
     assert [c.args for c in progress.await_args_list] == [(100, 200), (200, 200)]
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_mark_read_updates_dialog(reader, patch_client, supergroup):
+    client = patch_client(FakeClient(fresh=(200, 50)))
+    assert await reader.mark_read(supergroup, 200) == 50
+    assert client.acks == [200]
+    assert (supergroup.read_inbox_max_id, supergroup.unread_count) == (200, 50)
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_mark_read_without_fresh_count(reader, patch_client, supergroup):
+    client = patch_client(FakeClient(fresh_error=RuntimeError("boom")))
+    assert await reader.mark_read(supergroup, 9) is None
+    assert client.acks == [9] and supergroup.read_inbox_max_id == 9
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_mark_read_never_marks_whole_chat(reader, patch_client, supergroup):
+    client = patch_client(FakeClient())
+    with pytest.raises(ValueError):
+        await reader.mark_read(supergroup, 0)  # Telegram reads max_id=0 as "everything"
+    assert client.acks == []
 
 
 @pytest.mark.unit
