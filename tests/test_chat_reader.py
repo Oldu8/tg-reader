@@ -7,6 +7,11 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from telethon.tl import types
+from telethon.tl.functions.messages import (
+    GetForumTopicsByIDRequest,
+    GetForumTopicsRequest,
+    ReadDiscussionRequest,
+)
 
 from src import chat_reader
 from src.chat_reader import (
@@ -21,6 +26,7 @@ from src.chat_reader import (
     ChatReader,
     DialogInfo,
     FetchResult,
+    TopicInfo,
     dialog_from_telethon,
     dialog_kind,
     media_label,
@@ -74,14 +80,38 @@ def raw_message(mid, text="hi", **kw):
     return SimpleNamespace(**base)
 
 
+def forum_topic(tid, title="Topic", unread=0, read_max=0, **kw):
+    return types.ForumTopic(
+        id=tid,
+        date=T0,
+        peer=types.PeerChannel(42),
+        title=title,
+        icon_color=0,
+        top_message=tid,
+        read_inbox_max_id=read_max,
+        read_outbox_max_id=0,
+        unread_count=unread,
+        unread_mentions_count=0,
+        unread_reactions_count=0,
+        from_id=types.PeerUser(1),
+        notify_settings=types.PeerNotifySettings(),
+        **kw,
+    )
+
+
 class FakeClient:
-    def __init__(self, messages=(), dialogs=(), fresh=(0, 0), fresh_error=None):
+    def __init__(
+        self, messages=(), dialogs=(), fresh=(0, 0), fresh_error=None, topics=(), topic_fresh=(0, 0)
+    ):
         self._messages = list(messages)
         self._dialogs = list(dialogs)
         self._fresh = fresh
         self._fresh_error = fresh_error
+        self._topics = list(topics)
+        self._topic_fresh = topic_fresh
         self.iter_calls = []
         self.acks = []
+        self.requests = []
 
     async def get_me(self):
         return SimpleNamespace(id=ME)
@@ -90,15 +120,28 @@ class FakeClient:
         return types.InputPeerChannel(channel_id=42, access_hash=1)
 
     async def __call__(self, request):
+        self.requests.append(request)
+        if isinstance(request, GetForumTopicsRequest):
+            return SimpleNamespace(topics=self._topics)
+        if isinstance(request, ReadDiscussionRequest):
+            return True
         if self._fresh_error:
             raise self._fresh_error
         read_max, unread = self._fresh
+        if isinstance(request, GetForumTopicsByIDRequest):
+            read_max, unread = self._topic_fresh
+            return SimpleNamespace(
+                topics=[SimpleNamespace(read_inbox_max_id=read_max, unread_count=unread)]
+            )
         return SimpleNamespace(
             dialogs=[SimpleNamespace(read_inbox_max_id=read_max, unread_count=unread)]
         )
 
-    async def iter_messages(self, entity, limit=None, min_id=0, reverse=False):
-        self.iter_calls.append({"limit": limit, "min_id": min_id, "reverse": reverse})
+    async def iter_messages(self, entity, limit=None, min_id=0, reverse=False, reply_to=None):
+        call = {"limit": limit, "min_id": min_id, "reverse": reverse}
+        if reply_to is not None:
+            call["reply_to"] = reply_to
+        self.iter_calls.append(call)
         picked = sorted(
             (m for m in self._messages if m.id > min_id), key=lambda m: m.id if reverse else -m.id
         )
@@ -201,7 +244,11 @@ def test_dialog_from_telethon():
         read_inbox_max_id=17,
         peer_id=42,
     )
-    assert info.entity == "peer"
+    assert info.entity == "peer" and not info.forum
+    raw.entity = types.Channel(
+        id=42, title="F", photo=types.ChatPhotoEmpty(), date=T0, megagroup=True, forum=True
+    )
+    assert dialog_from_telethon(raw).forum
 
 
 @pytest.mark.unit
@@ -392,3 +439,56 @@ async def test_fetch_validates_arguments(reader, supergroup):
         await reader.fetch(supergroup, "everything", 10)
     with pytest.raises(ValueError):
         await reader.fetch(supergroup, MODE_LAST, 0)
+
+
+# --------------------------------------------------------------------------- forum topics
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_list_topics(reader, patch_client, supergroup):
+    topics = [
+        forum_topic(1, "General", unread=3, read_max=10),
+        types.ForumTopicDeleted(id=5),
+        forum_topic(7, "Жильё", closed=True),
+    ]
+    patch_client(FakeClient(topics=topics))
+    assert await reader.list_topics(supergroup) == [
+        TopicInfo(id=1, title="General", unread_count=3, read_inbox_max_id=10),
+        TopicInfo(id=7, title="Жильё", closed=True),
+    ]
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_fetch_topic_unread_uses_topic_state(reader, patch_client, supergroup):
+    messages = [raw_message(i) for i in range(1, 10)]
+    client = patch_client(FakeClient(messages, fresh=(8, 1), topic_fresh=(5, 2)))
+    topic = TopicInfo(id=3, title="Жильё", unread_count=9, read_inbox_max_id=1)
+    result = await reader.fetch(supergroup, MODE_UNREAD, 2, topic=topic)
+    assert client.iter_calls == [{"limit": 2, "min_id": 5, "reverse": True, "reply_to": 3}]
+    assert [m.message_id for m in result.messages] == [6, 7]
+    assert result.unread_total == 2 and result.last_id == 7
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_fetch_topic_state_falls_back_to_cached_topic(reader, patch_client, supergroup):
+    messages = [raw_message(i) for i in range(1, 10)]
+    client = patch_client(FakeClient(messages, fresh_error=RuntimeError("boom")))
+    topic = TopicInfo(id=3, title="Жильё", unread_count=9, read_inbox_max_id=4)
+    await reader.fetch(supergroup, MODE_UNREAD, 100, topic=topic)
+    assert client.iter_calls[0]["min_id"] == 4
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_mark_topic_read(reader, patch_client, supergroup):
+    client = patch_client(FakeClient(fresh=(90, 40), topic_fresh=(50, 7)))
+    topic = TopicInfo(id=3, title="Жильё", unread_count=57, read_inbox_max_id=10)
+    assert await reader.mark_read(supergroup, 50, topic=topic) == 7
+    read = [r for r in client.requests if isinstance(r, ReadDiscussionRequest)]
+    assert [(r.msg_id, r.read_max_id) for r in read] == [(3, 50)]
+    assert client.acks == []  # the whole chat is not touched
+    assert (topic.read_inbox_max_id, topic.unread_count) == (50, 7)
+    assert supergroup.unread_count == 40  # forum total refreshed for the chat list

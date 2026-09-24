@@ -4,8 +4,9 @@ Reads any chat of the personal Telegram account on demand.
 Unlike MessageCollector, which walks the channels listed in config.yaml over a
 time window, this module lists every dialog of the account and fetches either the
 last N messages (newest ones) or the next N unread ones (oldest unread first) of the
-dialog the user picked in the bot. Fetching never marks anything as read; the bot
-calls mark_read explicitly once the summary of an unread batch is delivered.
+dialog the user picked in the bot. Forum supergroups are read per topic (thread).
+Fetching never marks anything as read; the bot calls mark_read explicitly once the
+summary of an unread batch is delivered.
 """
 
 import logging
@@ -15,7 +16,12 @@ from typing import Any, Awaitable, Callable, Optional
 
 from telethon import TelegramClient
 from telethon.tl import types
-from telethon.tl.functions.messages import GetPeerDialogsRequest
+from telethon.tl.functions.messages import (
+    GetForumTopicsByIDRequest,
+    GetForumTopicsRequest,
+    GetPeerDialogsRequest,
+    ReadDiscussionRequest,
+)
 
 from src.collector import Message
 from src.config_loader import Config
@@ -32,6 +38,8 @@ MODE_UNREAD = "unread"
 MODE_LAST = "last"
 
 PROGRESS_EVERY = 100  # messages between progress callbacks
+TOPICS_LIMIT = 100  # ponytail: one page of forum topics; paginate if a forum ever has more
+GENERAL_TOPIC_ID = 1
 
 ProgressCallback = Callable[[int, int], Awaitable[None]]
 
@@ -48,6 +56,7 @@ class DialogInfo:
     archived: bool = False
     read_inbox_max_id: int = 0
     peer_id: int = 0  # bare id, used in t.me/c/<peer_id>/<msg_id> links
+    forum: bool = False  # supergroup split into topics
     entity: Any = field(default=None, repr=False, compare=False)  # Telethon input peer
 
     @property
@@ -62,6 +71,17 @@ class DialogInfo:
         if self.username:
             return f"https://t.me/{self.username}/{message_id}"
         return f"https://t.me/c/{self.peer_id}/{message_id}"
+
+
+@dataclass
+class TopicInfo:
+    """One topic (thread) of a forum supergroup."""
+
+    id: int  # id of the message that started the topic; GENERAL_TOPIC_ID is "General"
+    title: str
+    unread_count: int = 0
+    read_inbox_max_id: int = 0
+    closed: bool = False
 
 
 @dataclass
@@ -105,7 +125,19 @@ def dialog_from_telethon(dialog: Any) -> DialogInfo:
         archived=bool(dialog.archived),
         read_inbox_max_id=getattr(dialog.dialog, "read_inbox_max_id", 0) or 0,
         peer_id=getattr(entity, "id", 0),
+        forum=bool(getattr(entity, "forum", False)),
         entity=dialog.input_entity,
+    )
+
+
+def topic_from_telethon(topic: Any) -> TopicInfo:
+    """Convert a types.ForumTopic into a TopicInfo."""
+    return TopicInfo(
+        id=topic.id,
+        title=topic.title or "Без названия",
+        unread_count=topic.unread_count or 0,
+        read_inbox_max_id=topic.read_inbox_max_id or 0,
+        closed=bool(topic.closed),
     )
 
 
@@ -164,14 +196,31 @@ class ChatReader:
         self.logger.info(f"Loaded {len(dialogs)} dialogs")
         return dialogs
 
+    async def list_topics(self, dialog: DialogInfo) -> list[TopicInfo]:
+        """Topics of a forum supergroup in Telegram's order (pinned, then latest activity)."""
+        async with user_client(self.config) as client:
+            result = await client(
+                GetForumTopicsRequest(
+                    peer=dialog.entity,
+                    offset_date=None,
+                    offset_id=0,
+                    offset_topic=0,
+                    limit=TOPICS_LIMIT,
+                )
+            )
+        topics = [topic_from_telethon(t) for t in result.topics if isinstance(t, types.ForumTopic)]
+        self.logger.info(f"Loaded {len(topics)} topics of {dialog.title!r}")
+        return topics
+
     async def fetch(
         self,
         dialog: DialogInfo,
         mode: str,
         limit: int,
         progress: Optional[ProgressCallback] = None,
+        topic: Optional[TopicInfo] = None,
     ) -> FetchResult:
-        """Fetch messages of one dialog.
+        """Fetch messages of one dialog, or of one topic of a forum.
 
         Args:
             dialog: Dialog picked by the user
@@ -179,6 +228,7 @@ class ChatReader:
                 MODE_LAST (the newest `limit` messages, read or not)
             limit: Maximum number of messages to scan
             progress: Awaited as progress(fetched, expected) every PROGRESS_EVERY messages
+            topic: Forum topic to read instead of the whole chat
 
         Raises:
             ValueError: On an unknown mode or a non-positive limit
@@ -196,7 +246,7 @@ class ChatReader:
             expected = limit
             oldest_first = mode == MODE_UNREAD
             if mode == MODE_UNREAD:
-                min_id, unread_total = await self._fresh_unread_state(client, dialog)
+                min_id, unread_total = await self._fresh_unread_state(client, dialog, topic)
                 if unread_total == 0:
                     return FetchResult([], mode, limit, 0)
                 expected = min(limit, unread_total)
@@ -205,7 +255,11 @@ class ChatReader:
             seen = 0
             last_id = 0
             async for raw in client.iter_messages(
-                dialog.entity, limit=limit, min_id=min_id, reverse=oldest_first
+                dialog.entity,
+                limit=limit,
+                min_id=min_id,
+                reverse=oldest_first,
+                reply_to=topic.id if topic else None,
             ):
                 seen += 1
                 last_id = max(last_id, raw.id)
@@ -217,49 +271,80 @@ class ChatReader:
 
         if not oldest_first:
             messages.reverse()  # Telegram returns newest first
+        where = f"{dialog.title!r}" + (f" / {topic.title!r}" if topic else "")
         self.logger.info(
-            f"Fetched {len(messages)} messages from {dialog.title!r} "
+            f"Fetched {len(messages)} messages from {where} "
             f"(mode={mode}, limit={limit}, scanned={seen})"
         )
         return FetchResult(messages, mode, limit, unread_total, last_id)
 
-    async def mark_read(self, dialog: DialogInfo, max_id: int) -> Optional[int]:
+    async def mark_read(
+        self, dialog: DialogInfo, max_id: int, topic: Optional[TopicInfo] = None
+    ) -> Optional[int]:
         """Mark messages up to max_id as read, like opening the chat and scrolling to it.
 
-        Updates the dialog's cached unread state.
+        Updates the cached unread state of the dialog (and of the topic, if given).
 
         Returns:
-            Unread messages left, or None when Telegram did not report the new count
+            Unread messages left in the dialog or topic, or None when Telegram did not report it
 
         Raises:
             ValueError: On max_id <= 0 (Telegram treats 0 as "the whole chat")
         """
         if max_id <= 0:
             raise ValueError(f"max_id must be positive, got {max_id}")
+        topic_state: Optional[tuple[int, int]] = None
         async with user_client(self.config) as client:
-            await client.send_read_acknowledge(dialog.entity, max_id=max_id)
-            state = await self._peer_state(client, dialog)
-        dialog.read_inbox_max_id = max(dialog.read_inbox_max_id, max_id)
+            if topic is None:
+                await client.send_read_acknowledge(dialog.entity, max_id=max_id)
+            else:
+                await client(
+                    ReadDiscussionRequest(peer=dialog.entity, msg_id=topic.id, read_max_id=max_id)
+                )
+                topic_state = await self._topic_state(client, dialog, topic)
+            dialog_state = await self._peer_state(client, dialog)  # a forum's total changes too
+
+        if dialog_state is not None:
+            dialog.read_inbox_max_id, dialog.unread_count = dialog_state
+        target: DialogInfo | TopicInfo = dialog
+        state = dialog_state
+        if topic is not None:
+            target, state = topic, topic_state
+        target.read_inbox_max_id = max(target.read_inbox_max_id, max_id)
+        where = f"{dialog.title!r}" + (f" / {topic.title!r}" if topic else "")
         if state is None:
-            self.logger.info(f"Marked {dialog.title!r} read up to #{max_id}")
+            self.logger.info(f"Marked {where} read up to #{max_id}")
             return None
-        dialog.read_inbox_max_id, dialog.unread_count = state
-        self.logger.info(
-            f"Marked {dialog.title!r} read up to #{max_id}, {dialog.unread_count} unread left"
-        )
-        return dialog.unread_count
+        target.read_inbox_max_id, target.unread_count = state
+        self.logger.info(f"Marked {where} read up to #{max_id}, {target.unread_count} unread left")
+        return target.unread_count
 
     async def _fresh_unread_state(
-        self, client: TelegramClient, dialog: DialogInfo
+        self, client: TelegramClient, dialog: DialogInfo, topic: Optional[TopicInfo] = None
     ) -> tuple[int, int]:
         """Return (read_inbox_max_id, unread_count), refreshed from Telegram when possible.
 
         The dialog list in the bot may be minutes old; the user could have read the chat since.
         """
-        state = await self._peer_state(client, dialog)
+        if topic is not None:
+            state = await self._topic_state(client, dialog, topic)
+        else:
+            state = await self._peer_state(client, dialog)
         if state is None:  # stale numbers are still a usable answer
-            return dialog.read_inbox_max_id, dialog.unread_count
+            source = topic or dialog
+            return source.read_inbox_max_id, source.unread_count
         return state
+
+    async def _topic_state(
+        self, client: TelegramClient, dialog: DialogInfo, topic: TopicInfo
+    ) -> Optional[tuple[int, int]]:
+        try:
+            result = await client(GetForumTopicsByIDRequest(peer=dialog.entity, topics=[topic.id]))
+            fresh = result.topics[0]
+            return fresh.read_inbox_max_id or 0, fresh.unread_count or 0
+        except Exception as e:
+            self.logger.warning(f"Could not get unread state of topic {topic.title!r}: {e}")
+            return None
 
     async def _peer_state(
         self, client: TelegramClient, dialog: DialogInfo
