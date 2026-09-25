@@ -54,6 +54,15 @@ settings:
 
 
 @pytest.mark.unit
+def test_load_config_from_env_replaces_file(monkeypatch, mock_env_vars):
+    """CONFIG_YAML wins over the file, which then does not have to exist."""
+    monkeypatch.setenv("CONFIG_YAML", "settings:\n  target_user_id: 42\n  timezone: Europe/Kyiv\n")
+    config = load_config("nonexistent.yaml")
+    assert config.settings.target_user_id == 42
+    assert config.settings.timezone == "Europe/Kyiv"
+
+
+@pytest.mark.unit
 def test_load_config_missing_file():
     """Test error handling for missing config file."""
     with pytest.raises(FileNotFoundError):

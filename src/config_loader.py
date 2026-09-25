@@ -621,6 +621,9 @@ def load_config(config_path: str = "config.yaml") -> Config:
     """
     Load configuration from YAML file and environment variables.
 
+    The CONFIG_YAML environment variable, when set, replaces the file (hosts where
+    the config cannot be mounted as a file, e.g. Railway).
+
     Args:
         config_path: Path to config.yaml file
 
@@ -635,11 +638,14 @@ def load_config(config_path: str = "config.yaml") -> Config:
     load_dotenv()
 
     # Load YAML configuration
-    if not os.path.exists(config_path):
-        raise FileNotFoundError(f"Configuration file not found: {config_path}")
-
-    with open(config_path, "r", encoding="utf-8") as f:
-        yaml_config = yaml.safe_load(f)
+    inline = os.getenv("CONFIG_YAML", "").strip()
+    if inline:
+        yaml_config = yaml.safe_load(inline)
+    else:
+        if not os.path.exists(config_path):
+            raise FileNotFoundError(f"Configuration file not found: {config_path}")
+        with open(config_path, "r", encoding="utf-8") as f:
+            yaml_config = yaml.safe_load(f)
 
     if not isinstance(yaml_config, dict):
         raise ValueError(

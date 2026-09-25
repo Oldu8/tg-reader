@@ -4,7 +4,6 @@ Message collector using Telethon to fetch messages from Telegram channels.
 
 import asyncio
 import logging
-import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List
@@ -14,6 +13,7 @@ from telethon.errors import ChannelPrivateError, FloodWaitError
 from telethon.tl.types import Message as TelegramMessage
 
 from src.config_loader import ChannelConfig, Config
+from src.telegram_session import check_session_file, new_client
 from src.ui_strings import get_ui_strings
 
 
@@ -48,22 +48,15 @@ class MessageCollector:
         self.config = config
         self.logger = logger
         self._ui = get_ui_strings(config.settings.output_language)
-        self.client = TelegramClient(
-            "sessions/user", config.telegram_api_id, config.telegram_api_hash
-        )
+        self.client = new_client(config)
 
     async def connect(self):
         """Connect to Telegram using an existing user session.
 
-        Requires a pre-authenticated session file at sessions/user.session.
-        Create one by running: python -m src.collector
+        Requires a pre-authenticated session: sessions/user.session or TELEGRAM_SESSION.
+        Create one by running: python create_session.py
         """
-        session_path = "sessions/user.session"
-        if not os.path.exists(session_path):
-            raise RuntimeError(
-                f"Telegram user session not found at '{session_path}'. "
-                "Create one by running: python -m src.collector"
-            )
+        check_session_file()
         await self.client.connect()
         if not await self.client.is_user_authorized():
             raise RuntimeError(
