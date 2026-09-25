@@ -13,8 +13,15 @@ The script will:
 2. Send you a verification code
 3. Create sessions/user.session file
 4. This file can then be used in Docker without interactive prompts
-"""
 
+For hosts without a persistent disk (e.g. Railway):
+    python create_session.py --string
+
+logs in as a separate device ("tg_brief server") and writes a string session to
+sessions/server-session.txt (never printed). Put its content into the TELEGRAM_SESSION
+variable of the host, then delete the file. The server session can be terminated
+on its own in Telegram → Settings → Devices.
+"""
 
 import asyncio
 import os
@@ -23,9 +30,12 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 from telethon import TelegramClient
+from telethon.sessions import StringSession
+
+STRING_FILE = Path("sessions") / "server-session.txt"
 
 
-async def create_session():
+async def create_session(as_string: bool = False):
     """Create Telegram session interactively."""
     print("=" * 70)
     print("Telegram Session Creator for Docker Deployment")
@@ -52,11 +62,16 @@ async def create_session():
     sessions_dir.mkdir(exist_ok=True)
 
     print(f"API ID: {api_id}")
-    print("Session file: sessions/user.session")
+    print(f"Session file: {STRING_FILE if as_string else 'sessions/user.session'}")
     print()
 
     # Create client
-    client = TelegramClient("sessions/user", int(api_id), api_hash)
+    if as_string:
+        client = TelegramClient(
+            StringSession(), int(api_id), api_hash, device_model="tg_brief server"
+        )
+    else:
+        client = TelegramClient("sessions/user", int(api_id), api_hash)
 
     try:
         print("Connecting to Telegram...")
@@ -70,6 +85,16 @@ async def create_session():
 
         # Start client - this will prompt for authentication interactively
         await client.start()
+
+        if as_string:
+            STRING_FILE.write_text(client.session.save(), encoding="utf-8")
+            STRING_FILE.chmod(0o600)
+            print("-" * 70)
+            print()
+            print(f"✅ SUCCESS! String session saved to {STRING_FILE} (not printed)")
+            print("Put it into the TELEGRAM_SESSION variable of the server, then delete the file.")
+            print("=" * 70)
+            return
 
         print("-" * 70)
         print()
@@ -106,4 +131,4 @@ async def create_session():
 
 if __name__ == "__main__":
     print()
-    asyncio.run(create_session())
+    asyncio.run(create_session(as_string="--string" in sys.argv[1:]))

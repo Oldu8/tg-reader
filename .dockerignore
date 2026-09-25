@@ -80,6 +80,7 @@ logs/*.log
 # Sessions (will be mounted as volume)
 sessions/*.session
 sessions/*.session-journal
+sessions/*.txt
 
 # Data (will be mounted as volume)
 data/
